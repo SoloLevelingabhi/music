@@ -1,4 +1,3 @@
-### music
 # 🎵 Smart Audio Studio Bot
 
 A professional Telegram audio editing bot with interactive color UI, built with Pyrofork and MongoDB.
