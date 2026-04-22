@@ -193,8 +193,7 @@ async def prepare_audio_file(input_path: Path, output_ext: str) -> tuple[Path | 
     last_error = ""
     for _ in range(3):
         output_path = config.CACHE_DIR / f"{uuid.uuid4().hex}.{output_ext}"
-        if output_path.exists():
-            output_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
 
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), str(output_path)]
         ok, err = await run_ffmpeg(cmd)
@@ -219,7 +218,6 @@ async def apply_watermark(main_audio: Path, user_id: int) -> tuple[Path, str]:
 
     output_ext = main_audio.suffix.lstrip(".") or "mp3"
     out_path = config.CACHE_DIR / f"watermarked_{uuid.uuid4().hex}.{output_ext}"
-    out_path.unlink(missing_ok=True)
 
     position = settings.get("watermark_position", "end")
     if position == "start":
@@ -359,7 +357,6 @@ async def done_merge(_: Client, message: Message) -> None:
         settings = await store.get(user_id)
         output_ext = settings.get("output_format", "mp3")
         merged_file = merge_dir / f"merged_{uuid.uuid4().hex}.{output_ext}"
-        merged_file.unlink(missing_ok=True)
 
         codec_map = {
             "mp3": "libmp3lame",
