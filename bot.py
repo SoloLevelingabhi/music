@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Audio Editing Bot - Smart Audio Studio inside Telegram
-Author: Functional Python Implementation
-Requirements: pyrogram, motor, ffmpeg-python, pydub, mutagen, requests
+Fixed version - No pyaudioop dependency
 """
 
 import os
@@ -11,14 +10,16 @@ import traceback
 import asyncio
 import tempfile
 import shutil
+import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+import json
 
 # Core libraries
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, InputMediaAudio
+    CallbackQuery
 )
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
@@ -26,10 +27,10 @@ from pyrogram.errors import FloodWait
 # MongoDB
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# Audio processing
+# Audio processing using ffmpeg directly (no pydub)
 import ffmpeg
-from pydub import AudioSegment
-from pydub.effects import normalize
+
+# Metadata
 import mutagen
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TCON, TDRC
 
@@ -51,8 +52,6 @@ API_ID = 19500615   # Your API ID
 API_HASH = "7ee1d55d072add75a01e617fc0cef635"
 MONGO_URL = "mongodb+srv://cegin48057:HZuqtvUqi0tYJEda@cluster0.vw0nw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 
-# FFmpeg path (usually auto-detected, set if needed)
-FFMPEG_PATH = "ffmpeg"
 
 # File handling
 DOWNLOAD_DIR = "downloads"
@@ -73,6 +72,108 @@ mongo_client = AsyncIOMotorClient(MONGO_URL)
 db = mongo_client.audio_editor_bot
 sessions_collection = db.sessions
 settings_collection = db.settings
+
+# ==================== FFMPEG AUDIO PROCESSING FUNCTIONS ====================
+
+def get_audio_duration(file_path: str) -> float:
+    """Get audio duration in seconds using ffprobe"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+             '-of', 'default=noprint_wrappers=1:nokey=1', file_path],
+            capture_output=True, text=True, check=True
+        )
+        return float(result.stdout.strip())
+    except Exception as e:
+        logger.error(f"Duration error: {e}")
+        return 0
+
+def trim_audio(input_path: str, output_path: str, start_seconds: float, end_seconds: float):
+    """Trim audio using ffmpeg"""
+    duration = end_seconds - start_seconds
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-ss', str(start_seconds),
+        '-t', str(duration),
+        '-c', 'copy',
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def change_volume(input_path: str, output_path: str, factor: float):
+    """Change audio volume using ffmpeg"""
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', f'volume={factor}',
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def change_speed(input_path: str, output_path: str, speed: float):
+    """Change audio speed using ffmpeg"""
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', f'atempo={speed}',
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def normalize_audio(input_path: str, output_path: str):
+    """Normalize audio volume using ffmpeg"""
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', 'loudnorm=I=-16:LRA=11:TP=-1.5',
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def bass_boost(input_path: str, output_path: str):
+    """Apply bass boost using ffmpeg"""
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', 'bass=g=10',
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def convert_format(input_path: str, output_path: str, format_type: str):
+    """Convert audio format using ffmpeg"""
+    cmd = ['ffmpeg', '-i', input_path, '-y', output_path]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def compress_audio(input_path: str, output_path: str, bitrate: str):
+    """Compress audio using ffmpeg"""
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-b:a', bitrate,
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def generate_preview_ffmpeg(input_path: str, output_path: str, duration: int = 15):
+    """Generate preview using ffmpeg"""
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-t', str(duration),
+        '-c', 'copy',
+        '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+def merge_audios(input_paths: List[str], output_path: str):
+    """Merge multiple audio files using ffmpeg"""
+    # Create concat file
+    concat_file = tempfile.mktemp(suffix=".txt")
+    with open(concat_file, 'w') as f:
+        for path in input_paths:
+            f.write(f"file '{path}'\n")
+    
+    cmd = [
+        'ffmpeg', '-f', 'concat', '-safe', '0',
+        '-i', concat_file, '-c', 'copy', '-y', output_path
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    os.remove(concat_file)
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -111,6 +212,7 @@ async def get_user_session(user_id: int) -> dict:
             "edits": [],
             "metadata": {},
             "thumbnail_file_id": None,
+            "thumbnail_path": None,
             "settings": {},
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
@@ -145,9 +247,8 @@ async def download_audio(file_id: str, user_id: int) -> str:
         temp_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_{file_id}.mp3")
         await app.download_media(file_id, file_name=temp_path)
         
-        # Convert to standard format
-        audio = AudioSegment.from_file(temp_path)
-        audio.export(cache_path, format="mp3")
+        # Convert to standard format using ffmpeg
+        convert_format(temp_path, cache_path, "mp3")
         
         # Cleanup temp file
         if os.path.exists(temp_path):
@@ -158,126 +259,147 @@ async def download_audio(file_id: str, user_id: int) -> str:
         logger.error(f"Download error: {e}")
         raise
 
-async def apply_edits(audio_path: str, edits: List[dict]) -> str:
-    """Apply all edits in sequence to audio file"""
+async def apply_all_edits(audio_path: str, edits: List[dict]) -> str:
+    """Apply all edits in sequence using ffmpeg"""
     try:
-        # Load audio
-        audio = AudioSegment.from_file(audio_path)
+        current_path = audio_path
+        temp_files = []
         
-        for edit in edits:
+        for i, edit in enumerate(edits):
             edit_type = edit.get("type")
+            output_path = tempfile.mktemp(suffix=f"_edit_{i}.mp3")
+            temp_files.append(output_path)
             
             if edit_type == "trim":
-                start = edit.get("start", 0) * 1000  # Convert to ms
-                end = edit.get("end", len(audio)) * 1000
-                audio = audio[start:end]
+                trim_audio(current_path, output_path, 
+                          edit.get("start", 0), 
+                          edit.get("end", 60))
             
             elif edit_type == "volume":
-                factor = edit.get("factor", 1.0)
-                audio = audio + (factor - 1) * 10  # Approximate volume change
+                change_volume(current_path, output_path, edit.get("factor", 1.0))
             
             elif edit_type == "speed":
-                speed = edit.get("speed", 1.0)
-                audio = audio.speedup(playback_speed=speed)
+                change_speed(current_path, output_path, edit.get("speed", 1.0))
             
             elif edit_type == "normalize":
-                audio = normalize(audio)
+                normalize_audio(current_path, output_path)
             
             elif edit_type == "bass_boost":
-                audio = audio.low_pass_filter(300)  # Simple bass boost
+                bass_boost(current_path, output_path)
             
             elif edit_type == "compress":
-                bitrate = edit.get("bitrate", "128k")
-                # Compression handled during export
+                compress_audio(current_path, output_path, edit.get("bitrate", "128k"))
             
-        # Generate output path
-        output_path = tempfile.mktemp(suffix=".mp3")
-        audio.export(output_path, format="mp3", bitrate="192k")
+            elif edit_type == "convert":
+                convert_format(current_path, output_path, edit.get("format", "mp3"))
+            
+            # Clean up previous file if not original
+            if current_path != audio_path and os.path.exists(current_path):
+                os.remove(current_path)
+            
+            current_path = output_path
         
-        return output_path
+        # Final output path
+        final_output = tempfile.mktemp(suffix=".mp3")
+        shutil.copy(current_path, final_output)
+        
+        # Cleanup temp files
+        for temp_file in temp_files:
+            if os.path.exists(temp_file) and temp_file != current_path:
+                os.remove(temp_file)
+        
+        return final_output
     except Exception as e:
-        logger.error(f"Edit application error: {e}")
+        logger.error(f"Edit application error: {traceback.format_exc()}")
         raise
 
-async def generate_preview(audio_path: str, duration: int = 15) -> str:
-    """Generate short preview of audio"""
+async def add_metadata_to_audio(audio_path: str, metadata: dict, thumbnail_path: str = None) -> str:
+    """Add ID3 tags and thumbnail to audio using mutagen"""
     try:
-        audio = AudioSegment.from_file(audio_path)
-        preview = audio[:duration * 1000]  # First N seconds
-        preview_path = tempfile.mktemp(suffix="_preview.mp3")
-        preview.export(preview_path, format="mp3")
-        return preview_path
+        # Load audio with mutagen
+        audio = mutagen.File(audio_path, easy=True)
+        
+        if metadata.get("title"):
+            audio['title'] = metadata["title"]
+        if metadata.get("artist"):
+            audio['artist'] = metadata["artist"]
+        if metadata.get("album"):
+            audio['album'] = metadata["album"]
+        if metadata.get("genre"):
+            audio['genre'] = metadata["genre"]
+        if metadata.get("year"):
+            audio['date'] = metadata["year"]
+        
+        audio.save()
+        
+        # Add thumbnail if provided (requires ID3 for MP3)
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            try:
+                id3 = ID3(audio_path)
+                with open(thumbnail_path, 'rb') as f:
+                    id3.add(APIC(
+                        encoding=3,
+                        mime='image/jpeg',
+                        type=3,
+                        desc='Cover',
+                        data=f.read()
+                    ))
+                id3.save()
+            except:
+                # If no ID3 tags exist, create them
+                id3 = ID3()
+                with open(thumbnail_path, 'rb') as f:
+                    id3.add(APIC(
+                        encoding=3,
+                        mime='image/jpeg',
+                        type=3,
+                        desc='Cover',
+                        data=f.read()
+                    ))
+                id3.save(audio_path)
+        
+        return audio_path
     except Exception as e:
-        logger.error(f"Preview generation error: {e}")
-        raise
+        logger.error(f"Metadata addition error: {e}")
+        return audio_path
 
 async def fetch_metadata_from_api(query: str) -> dict:
-    """Fetch metadata from external API (MusicBrainz example)"""
+    """Fetch metadata from MusicBrainz API"""
     try:
-        # Simple MusicBrainz search
-        url = f"https://musicbrainz.org/ws/2/recording/"
-        params = {"query": query, "fmt": "json"}
+        # Search for recording
+        url = "https://musicbrainz.org/ws/2/recording/"
+        params = {"query": query, "fmt": "json", "limit": 1}
         
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             data = response.json()
             if data.get("recordings"):
                 recording = data["recordings"][0]
-                return {
+                metadata = {
                     "title": recording.get("title", ""),
-                    "artist": recording.get("artist-credit", [{}])[0].get("name", ""),
-                    "album": recording.get("releases", [{}])[0].get("title", ""),
-                    "year": recording.get("first-release-date", "").split("-")[0]
                 }
+                
+                # Get artist
+                if recording.get("artist-credit"):
+                    metadata["artist"] = recording["artist-credit"][0].get("name", "")
+                
+                # Get release info
+                if recording.get("releases"):
+                    release = recording["releases"][0]
+                    metadata["album"] = release.get("title", "")
+                    if release.get("date"):
+                        metadata["year"] = release.get("date", "")[:4]
+                
+                return metadata
         return {}
     except Exception as e:
         logger.error(f"Metadata fetch error: {e}")
         return {}
 
-async def add_metadata(audio_path: str, metadata: dict, thumbnail_path: str = None):
-    """Add ID3 tags and thumbnail to audio"""
-    try:
-        audio = AudioSegment.from_file(audio_path)
-        
-        # Save with metadata using mutagen
-        temp_output = tempfile.mktemp(suffix=".mp3")
-        audio.export(temp_output, format="mp3")
-        
-        # Add ID3 tags
-        tags = ID3(temp_output)
-        
-        if metadata.get("title"):
-            tags.add(TIT2(encoding=3, text=metadata["title"]))
-        if metadata.get("artist"):
-            tags.add(TPE1(encoding=3, text=metadata["artist"]))
-        if metadata.get("album"):
-            tags.add(TALB(encoding=3, text=metadata["album"]))
-        if metadata.get("genre"):
-            tags.add(TCON(encoding=3, text=metadata["genre"]))
-        if metadata.get("year"):
-            tags.add(TDRC(encoding=3, text=metadata["year"]))
-        
-        # Add thumbnail
-        if thumbnail_path and os.path.exists(thumbnail_path):
-            with open(thumbnail_path, "rb") as f:
-                tags.add(APIC(
-                    encoding=3,
-                    mime='image/jpeg',
-                    type=3,
-                    desc='Cover',
-                    data=f.read()
-                ))
-        
-        tags.save(temp_output)
-        return temp_output
-    except Exception as e:
-        logger.error(f"Metadata addition error: {e}")
-        return audio_path
-
 # ==================== KEYBOARD MENUS ====================
 
 def get_main_menu() -> InlineKeyboardMarkup:
-    """Main editing menu with colored buttons"""
+    """Main editing menu"""
     buttons = [
         [
             InlineKeyboardButton("✂️ Trim", callback_data="menu_trim"),
@@ -290,11 +412,12 @@ def get_main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📝 Metadata", callback_data="menu_metadata")
         ],
         [
+            InlineKeyboardButton("🔀 Merge", callback_data="menu_merge"),
             InlineKeyboardButton("🎬 Preview", callback_data="action_preview"),
-            InlineKeyboardButton("✅ Export", callback_data="action_export"),
-            InlineKeyboardButton("🗑 Reset", callback_data="action_reset")
+            InlineKeyboardButton("✅ Export", callback_data="action_export")
         ],
         [
+            InlineKeyboardButton("🗑 Reset", callback_data="action_reset"),
             InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"),
             InlineKeyboardButton("ℹ️ Info", callback_data="action_info")
         ]
@@ -319,32 +442,32 @@ def get_volume_menu() -> InlineKeyboardMarkup:
     """Volume control menu"""
     buttons = [
         [
-            InlineKeyboardButton("🔇 -50%", callback_data="vol_0.5"),
-            InlineKeyboardButton("🔉 -25%", callback_data="vol_0.75")
+            InlineKeyboardButton("🔇 50%", callback_data="vol_0.5"),
+            InlineKeyboardButton("🔉 75%", callback_data="vol_0.75"),
+            InlineKeyboardButton("🔊 100%", callback_data="vol_1.0")
         ],
         [
-            InlineKeyboardButton("🔊 +25%", callback_data="vol_1.25"),
-            InlineKeyboardButton("📢 +50%", callback_data="vol_1.5")
+            InlineKeyboardButton("📢 125%", callback_data="vol_1.25"),
+            InlineKeyboardButton("🔊 150%", callback_data="vol_1.5"),
+            InlineKeyboardButton("💥 200%", callback_data="vol_2.0")
         ],
         [
-            InlineKeyboardButton("🔊 Normalize", callback_data="vol_normalize"),
+            InlineKeyboardButton("✨ Normalize", callback_data="vol_normalize"),
             InlineKeyboardButton("🔙 Back", callback_data="back_main")
         ]
     ]
     return InlineKeyboardMarkup(buttons)
 
-def get_speed_menu() -> InlineKeyboardMarkup:
+def get_speed_menu() -> InlineKeyboardMarkup():
     """Speed control menu"""
     buttons = [
         [
             InlineKeyboardButton("🐢 0.5x", callback_data="speed_0.5"),
-            InlineKeyboardButton("🚶 0.75x", callback_data="speed_0.75")
+            InlineKeyboardButton("🚶 0.75x", callback_data="speed_0.75"),
+            InlineKeyboardButton("🏃 1.25x", callback_data="speed_1.25")
         ],
         [
-            InlineKeyboardButton("🏃 1.25x", callback_data="speed_1.25"),
-            InlineKeyboardButton("⚡ 1.5x", callback_data="speed_1.5")
-        ],
-        [
+            InlineKeyboardButton("⚡ 1.5x", callback_data="speed_1.5"),
             InlineKeyboardButton("💨 2.0x", callback_data="speed_2.0"),
             InlineKeyboardButton("🔙 Back", callback_data="back_main")
         ]
@@ -371,14 +494,11 @@ def get_enhance_menu() -> InlineKeyboardMarkup:
     """Audio enhancement menu"""
     buttons = [
         [
-            InlineKeyboardButton("✨ Normalize", callback_data="enhance_normalize"),
+            InlineKeyboardButton("✨ Normalize Volume", callback_data="enhance_normalize"),
             InlineKeyboardButton("🎸 Bass Boost", callback_data="enhance_bass")
         ],
         [
-            InlineKeyboardButton("🔇 Noise Reduction", callback_data="enhance_noise"),
-            InlineKeyboardButton("📊 Compress", callback_data="menu_compress")
-        ],
-        [
+            InlineKeyboardButton("📦 Compress", callback_data="menu_compress"),
             InlineKeyboardButton("🔙 Back", callback_data="back_main")
         ]
     ]
@@ -388,12 +508,12 @@ def get_compress_menu() -> InlineKeyboardMarkup:
     """Compression menu"""
     buttons = [
         [
-            InlineKeyboardButton("📦 Low (64k)", callback_data="compress_low"),
-            InlineKeyboardButton("📦 Medium (128k)", callback_data="compress_medium")
+            InlineKeyboardButton("📦 Low (64kbps)", callback_data="compress_low"),
+            InlineKeyboardButton("📦 Medium (128kbps)", callback_data="compress_medium")
         ],
         [
-            InlineKeyboardButton("📦 High (192k)", callback_data="compress_high"),
-            InlineKeyboardButton("🎚 Custom", callback_data="compress_custom")
+            InlineKeyboardButton("📦 High (192kbps)", callback_data="compress_high"),
+            InlineKeyboardButton("💎 Max (320kbps)", callback_data="compress_max")
         ],
         [
             InlineKeyboardButton("🔙 Back", callback_data="back_main")
@@ -413,10 +533,11 @@ def get_metadata_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎭 Genre", callback_data="meta_genre")
         ],
         [
-            InlineKeyboardButton("🖼 Thumbnail", callback_data="meta_thumbnail"),
-            InlineKeyboardButton("🌐 Auto Fetch", callback_data="meta_autofetch")
+            InlineKeyboardButton("📅 Year", callback_data="meta_year"),
+            InlineKeyboardButton("🖼 Thumbnail", callback_data="meta_thumbnail")
         ],
         [
+            InlineKeyboardButton("🌐 Auto Fetch", callback_data="meta_autofetch"),
             InlineKeyboardButton("🔙 Back", callback_data="back_main")
         ]
     ]
@@ -450,6 +571,23 @@ def get_settings_menu(settings: dict) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(buttons)
 
+def get_merge_menu() -> InlineKeyboardMarkup:
+    """Merge audio menu"""
+    buttons = [
+        [
+            InlineKeyboardButton("➕ Add Audio", callback_data="merge_add"),
+            InlineKeyboardButton("📋 View Queue", callback_data="merge_view")
+        ],
+        [
+            InlineKeyboardButton("🔀 Merge Now", callback_data="merge_now"),
+            InlineKeyboardButton("🗑 Clear Queue", callback_data="merge_clear")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data="back_main")
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
 # ==================== BOT COMMAND HANDLERS ====================
 
 @app.on_message(filters.command("start"))
@@ -467,6 +605,7 @@ I'm your professional audio editing assistant inside Telegram.
 🔄 Format Conversion
 🎨 Audio Enhancements
 📝 Metadata & Thumbnails
+🔀 Merge Multiple Audios
 🎬 Preview Before Export
 
 **How to use:**
@@ -617,10 +756,13 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.message.edit_reply_markup(reply_markup=get_compress_menu())
         await callback_query.answer("Compression settings")
     
+    elif data == "menu_merge":
+        await callback_query.message.edit_reply_markup(reply_markup=get_merge_menu())
+        await callback_query.answer("Merge mode - Send audio files to add to queue")
+    
     # Trim actions
     elif data == "trim_set_start":
         await callback_query.answer("Send the start time in seconds (e.g., 30 for 30 seconds)", show_alert=True)
-        # Store state in session
         session["awaiting_trim_start"] = True
         await update_user_session(user_id, session)
     
@@ -630,12 +772,14 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await update_user_session(user_id, session)
     
     elif data == "trim_apply":
-        if session.get("trim_start") and session.get("trim_end"):
+        if session.get("trim_start") is not None and session.get("trim_end") is not None:
             edit = {
                 "type": "trim",
                 "start": session["trim_start"],
                 "end": session["trim_end"]
             }
+            if "edits" not in session:
+                session["edits"] = []
             session["edits"].append(edit)
             await update_user_session(user_id, session)
             await callback_query.answer("Trim applied successfully!", show_alert=True)
@@ -645,24 +789,27 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     
     # Volume actions
     elif data.startswith("vol_"):
-        factor = float(data.split("_")[1])
-        edit = {"type": "volume", "factor": factor}
+        if data == "vol_normalize":
+            edit = {"type": "normalize"}
+            await callback_query.answer("Normalization added", show_alert=True)
+        else:
+            factor = float(data.split("_")[1])
+            edit = {"type": "volume", "factor": factor}
+            await callback_query.answer(f"Volume set to {factor}x", show_alert=True)
+        
+        if "edits" not in session:
+            session["edits"] = []
         session["edits"].append(edit)
         await update_user_session(user_id, session)
-        await callback_query.answer(f"Volume set to {factor}x", show_alert=True)
-        await callback_query.message.edit_reply_markup(reply_markup=get_main_menu())
-    
-    elif data == "vol_normalize":
-        edit = {"type": "normalize"}
-        session["edits"].append(edit)
-        await update_user_session(user_id, session)
-        await callback_query.answer("Audio normalized", show_alert=True)
         await callback_query.message.edit_reply_markup(reply_markup=get_main_menu())
     
     # Speed actions
     elif data.startswith("speed_"):
         speed = float(data.split("_")[1])
         edit = {"type": "speed", "speed": speed}
+        
+        if "edits" not in session:
+            session["edits"] = []
         session["edits"].append(edit)
         await update_user_session(user_id, session)
         await callback_query.answer(f"Speed set to {speed}x", show_alert=True)
@@ -672,6 +819,9 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     elif data.startswith("convert_"):
         format_type = data.split("_")[1]
         edit = {"type": "convert", "format": format_type}
+        
+        if "edits" not in session:
+            session["edits"] = []
         session["edits"].append(edit)
         session["output_format"] = format_type
         await update_user_session(user_id, session)
@@ -681,6 +831,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     # Enhance actions
     elif data == "enhance_normalize":
         edit = {"type": "normalize"}
+        if "edits" not in session:
+            session["edits"] = []
         session["edits"].append(edit)
         await update_user_session(user_id, session)
         await callback_query.answer("Normalization added", show_alert=True)
@@ -688,21 +840,22 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     
     elif data == "enhance_bass":
         edit = {"type": "bass_boost"}
+        if "edits" not in session:
+            session["edits"] = []
         session["edits"].append(edit)
         await update_user_session(user_id, session)
         await callback_query.answer("Bass boost added", show_alert=True)
         await callback_query.message.edit_reply_markup(reply_markup=get_main_menu())
     
-    elif data == "enhance_noise":
-        await callback_query.answer("Noise reduction coming soon!", show_alert=True)
-    
     # Compression actions
     elif data.startswith("compress_"):
         level = data.split("_")[1]
-        bitrates = {"low": "64k", "medium": "128k", "high": "192k"}
+        bitrates = {"low": "64k", "medium": "128k", "high": "192k", "max": "320k"}
         bitrate = bitrates.get(level, "128k")
         
         edit = {"type": "compress", "bitrate": bitrate, "level": level}
+        if "edits" not in session:
+            session["edits"] = []
         session["edits"].append(edit)
         await update_user_session(user_id, session)
         await callback_query.answer(f"Compression set to {level}", show_alert=True)
@@ -729,15 +882,50 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         session["awaiting_meta_genre"] = True
         await update_user_session(user_id, session)
     
+    elif data == "meta_year":
+        await callback_query.answer("Send the year (e.g., 2024)", show_alert=True)
+        session["awaiting_meta_year"] = True
+        await update_user_session(user_id, session)
+    
     elif data == "meta_thumbnail":
         await callback_query.answer("Send a photo to use as album art", show_alert=True)
         session["awaiting_thumbnail"] = True
         await update_user_session(user_id, session)
     
     elif data == "meta_autofetch":
-        await callback_query.answer("Send song name to fetch metadata", show_alert=True)
+        await callback_query.answer("Send song/artist name to fetch metadata", show_alert=True)
         session["awaiting_autofetch"] = True
         await update_user_session(user_id, session)
+    
+    # Merge actions
+    elif data == "merge_add":
+        await callback_query.answer("Send the audio file you want to add to merge queue", show_alert=True)
+        session["awaiting_merge_add"] = True
+        await update_user_session(user_id, session)
+    
+    elif data == "merge_view":
+        merge_queue = session.get("merge_queue", [])
+        if merge_queue:
+            queue_text = "📋 **Merge Queue:**\n\n"
+            for i, file in enumerate(merge_queue, 1):
+                queue_text += f"{i}. {file.get('name', 'Unknown')}\n"
+            await callback_query.message.reply_text(queue_text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await callback_query.answer("Merge queue is empty! Add audio files first.", show_alert=True)
+    
+    elif data == "merge_now":
+        merge_queue = session.get("merge_queue", [])
+        if len(merge_queue) < 2:
+            await callback_query.answer("Need at least 2 audio files to merge!", show_alert=True)
+        else:
+            await callback_query.answer("Merging audio files...", show_alert=True)
+            # TODO: Implement merge logic
+            await callback_query.message.reply_text("🔄 Merge feature will be implemented in next update!")
+    
+    elif data == "merge_clear":
+        session["merge_queue"] = []
+        await update_user_session(user_id, session)
+        await callback_query.answer("Merge queue cleared!", show_alert=True)
     
     # Preview action
     elif data == "action_preview":
@@ -749,7 +937,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         
         try:
             # Apply current edits to generate preview
-            temp_preview = await generate_preview(session["current_file"], duration=15)
+            temp_preview = tempfile.mktemp(suffix="_preview.mp3")
+            
+            if session.get("edits"):
+                processed_path = await apply_all_edits(session["current_file"], session["edits"])
+                generate_preview_ffmpeg(processed_path, temp_preview, duration=15)
+                if os.path.exists(processed_path):
+                    os.remove(processed_path)
+            else:
+                generate_preview_ffmpeg(session["current_file"], temp_preview, duration=15)
             
             # Send preview
             await callback_query.message.reply_audio(
@@ -764,7 +960,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 os.remove(temp_preview)
                 
         except Exception as e:
-            logger.error(f"Preview error: {e}")
+            logger.error(f"Preview error: {traceback.format_exc()}")
             await callback_query.answer(f"Preview failed: {str(e)}", show_alert=True)
     
     # Export action
@@ -773,15 +969,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("No audio loaded!", show_alert=True)
             return
         
-        status_msg = await callback_query.message.reply_text("🎨 **Processing your audio...**", parse_mode=ParseMode.MARKDOWN)
+        status_msg = await callback_query.message.reply_text("🎨 **Processing your audio...**\n\nThis may take a moment.", parse_mode=ParseMode.MARKDOWN)
         
         try:
             # Apply all edits
-            processed_path = await apply_edits(session["current_file"], session.get("edits", []))
+            processed_path = await apply_all_edits(session["current_file"], session.get("edits", []))
             
             # Add metadata if available
             if session.get("metadata"):
-                processed_path = await add_metadata(
+                processed_path = await add_metadata_to_audio(
                     processed_path,
                     session["metadata"],
                     session.get("thumbnail_path")
@@ -789,10 +985,13 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             
             # Send final result
             format_type = session.get("output_format", "mp3")
+            title = session.get("metadata", {}).get("title", "Edited Audio")
+            artist = session.get("metadata", {}).get("artist", "Audio Editor Bot")
+            
             await callback_query.message.reply_audio(
                 audio=processed_path,
-                title=session.get("metadata", {}).get("title", "Edited Audio"),
-                performer=session.get("metadata", {}).get("artist", "Audio Editor Bot"),
+                title=title,
+                performer=artist,
                 caption="✅ **Export complete!**\n\nThank you for using Audio Studio Bot! 🎵",
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -817,9 +1016,11 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     # Info action
     elif data == "action_info":
         if session.get("current_file"):
+            duration = get_audio_duration(session["current_file"])
             info_text = f"""
 📊 **Audio Information**
 
+⏱ **Duration:** `{int(duration // 60)}:{int(duration % 60):02d}`
 📝 **Edits applied:** `{len(session.get('edits', []))}`
 🎵 **Output format:** `{session.get('output_format', 'mp3')}`
 📦 **Metadata:** `{'Yes' if session.get('metadata') else 'No'}`
@@ -889,44 +1090,64 @@ async def handle_text_input(client: Client, message: Message):
     
     # Handle metadata inputs
     elif session.get("awaiting_meta_title"):
+        if "metadata" not in session:
+            session["metadata"] = {}
         session["metadata"]["title"] = text
         session["awaiting_meta_title"] = False
         await update_user_session(user_id, session)
         await message.reply_text(f"✅ Title set to: {text}")
     
     elif session.get("awaiting_meta_artist"):
+        if "metadata" not in session:
+            session["metadata"] = {}
         session["metadata"]["artist"] = text
         session["awaiting_meta_artist"] = False
         await update_user_session(user_id, session)
         await message.reply_text(f"✅ Artist set to: {text}")
     
     elif session.get("awaiting_meta_album"):
+        if "metadata" not in session:
+            session["metadata"] = {}
         session["metadata"]["album"] = text
         session["awaiting_meta_album"] = False
         await update_user_session(user_id, session)
         await message.reply_text(f"✅ Album set to: {text}")
     
     elif session.get("awaiting_meta_genre"):
+        if "metadata" not in session:
+            session["metadata"] = {}
         session["metadata"]["genre"] = text
         session["awaiting_meta_genre"] = False
         await update_user_session(user_id, session)
         await message.reply_text(f"✅ Genre set to: {text}")
+    
+    elif session.get("awaiting_meta_year"):
+        if "metadata" not in session:
+            session["metadata"] = {}
+        session["metadata"]["year"] = text
+        session["awaiting_meta_year"] = False
+        await update_user_session(user_id, session)
+        await message.reply_text(f"✅ Year set to: {text}")
     
     elif session.get("awaiting_autofetch"):
         await message.reply_text("🔍 Fetching metadata from MusicBrainz...")
         metadata = await fetch_metadata_from_api(text)
         
         if metadata:
+            if "metadata" not in session:
+                session["metadata"] = {}
             session["metadata"].update(metadata)
             await update_user_session(user_id, session)
-            await message.reply_text(f"""
+            
+            info_text = f"""
 ✅ **Metadata fetched successfully!**
 
 📝 Title: {metadata.get('title', 'N/A')}
 👤 Artist: {metadata.get('artist', 'N/A')}
 💿 Album: {metadata.get('album', 'N/A')}
 📅 Year: {metadata.get('year', 'N/A')}
-            """)
+            """
+            await message.reply_text(info_text)
         else:
             await message.reply_text("❌ Could not fetch metadata. Please enter manually.")
         
@@ -958,15 +1179,47 @@ async def handle_thumbnail(client: Client, message: Message):
             logger.error(f"Thumbnail error: {e}")
             await message.reply_text("❌ Failed to save thumbnail. Please try again.")
 
+# ==================== AUDIO HANDLER FOR MERGE QUEUE ====================
+
+@app.on_message(filters.audio & filters.private)
+async def handle_merge_audio(client: Client, message: Message):
+    """Handle audio files for merge queue"""
+    user_id = message.from_user.id
+    session = await get_user_session(user_id)
+    
+    if session.get("awaiting_merge_add"):
+        try:
+            audio = message.audio
+            file_id = audio.file_id
+            file_name = audio.file_name or f"audio_{len(session.get('merge_queue', [])) + 1}"
+            
+            # Download audio for merge
+            audio_path = await download_audio(file_id, user_id)
+            
+            if "merge_queue" not in session:
+                session["merge_queue"] = []
+            
+            session["merge_queue"].append({
+                "file_id": file_id,
+                "name": file_name,
+                "path": audio_path
+            })
+            session["awaiting_merge_add"] = False
+            await update_user_session(user_id, session)
+            
+            await message.reply_text(f"✅ Added to merge queue: {file_name}\n\nQueue size: {len(session['merge_queue'])}/10\nUse merge menu to add more or merge now.")
+        except Exception as e:
+            logger.error(f"Merge add error: {e}")
+            await message.reply_text(f"❌ Failed to add audio: {str(e)}")
+
 # ==================== ERROR HANDLING ====================
 
 @app.on_error()
 async def error_handler(client: Client, error: Exception):
     """Global error handler"""
     logger.error(f"Global error: {traceback.format_exc()}")
-    # Don't crash the bot, just log
 
-# ==================== MAIN ====================
+# ==================== CLEANUP TASK ====================
 
 async def cleanup_old_files():
     """Periodically clean up old downloaded files"""
@@ -974,26 +1227,22 @@ async def cleanup_old_files():
         try:
             # Delete files older than 1 hour
             cutoff = datetime.now() - timedelta(hours=1)
-            for file in os.listdir(DOWNLOAD_DIR):
-                file_path = os.path.join(DOWNLOAD_DIR, file)
-                if os.path.isfile(file_path):
-                    file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-                    if file_time < cutoff:
-                        os.remove(file_path)
-                        logger.info(f"Cleaned up old file: {file}")
-            
-            for file in os.listdir(CACHE_DIR):
-                file_path = os.path.join(CACHE_DIR, file)
-                if os.path.isfile(file_path):
-                    file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-                    if file_time < cutoff:
-                        os.remove(file_path)
-                        logger.info(f"Cleaned up cached file: {file}")
+            for directory in [DOWNLOAD_DIR, CACHE_DIR]:
+                if os.path.exists(directory):
+                    for file in os.listdir(directory):
+                        file_path = os.path.join(directory, file)
+                        if os.path.isfile(file_path):
+                            file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                            if file_time < cutoff:
+                                os.remove(file_path)
+                                logger.info(f"Cleaned up old file: {file}")
             
             await asyncio.sleep(3600)  # Run every hour
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
             await asyncio.sleep(3600)
+
+# ==================== MAIN ====================
 
 if __name__ == "__main__":
     # Start cleanup task
