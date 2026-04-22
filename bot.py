@@ -372,7 +372,7 @@ async def done_merge(_: Client, message: Message) -> None:
         list_file = merge_dir / "inputs.txt"
         with list_file.open("w", encoding="utf-8") as f:
             for p in local_paths:
-                safe_path = str(p.resolve()).replace("'", "'\\''")
+                safe_path = str(p.resolve())
                 f.write(f"file '{safe_path}'\n")
 
         settings = await store.get(user_id)
