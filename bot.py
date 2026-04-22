@@ -52,7 +52,7 @@ BOT_TOKEN = "8765826723:AAH1HhVIVKv83uueUnxjZfTRG-vM61_bhEU"
 API_ID = 19500615
 API_HASH = "7ee1d55d072add75a01e617fc0cef635"
 MONGO_URL = "mongodb+srv://cegin48057:HZuqtvUqi0tYJEda@cluster0.vw0nw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-OWNER_ID = 8765826723  # Replace with your owner ID
+OWNER_ID = 6441347235  # Replace with your owner ID
 
 # File handling
 DOWNLOAD_DIR = "downloads"
