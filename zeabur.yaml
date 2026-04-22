@@ -1,0 +1,14 @@
+apiVersion: zeabur.com/v1
+kind: Service
+metadata:
+  name: audio-editor-bot
+spec:
+  type: worker
+  python:
+    version: "3.10"
+  build:
+    commands:
+      - apt-get update && apt-get install -y ffmpeg
+      - pip install -r requirements.txt
+  run:
+    command: python bot.py
