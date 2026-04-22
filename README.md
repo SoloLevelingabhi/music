@@ -75,3 +75,24 @@ EOF
 
 # Run bot
 python bot.py
+
+## 📁 File Structure
+smart-audio-studio-bot/
+├── .github/
+│   └── workflows/
+│       └── deploy.yml
+├── bot.py                    # Main bot file
+├── config.py                 # Configuration handler
+├── alive.py                  # Keep-alive web server
+├── requirements.txt          # Python dependencies
+├── Dockerfile               # Docker configuration
+├── Procfile                 # Heroku process file
+├── runtime.txt              # Python version for Heroku
+├── app.json                 # Heroku deploy config
+├── heroku.yml               # Heroku Docker config
+├── render.yaml              # Render deploy config
+├── koyeb.yaml               # Koyeb deploy config
+├── railway.json             # Railway deploy config
+├── fly.toml                 # Fly.io deploy config
+├── zeabur.yaml              # Zeabur deploy config
+└── README.md                # Documentation
