@@ -1,1 +1,38 @@
-
+{
+  "name": "Smart Audio Studio Bot",
+  "description": "Telegram audio editing bot with MongoDB",
+  "repository": "",
+  "keywords": ["telegram", "bot", "audio", "editor", "ffmpeg"],
+  "env": {
+    "API_ID": {
+      "description": "Telegram API ID",
+      "required": false
+    },
+    "API_HASH": {
+      "description": "Telegram API Hash",
+      "required": false
+    },
+    "BOT_TOKEN": {
+      "description": "Bot token from @BotFather",
+      "required": false
+    },
+    "MONGO_URI": {
+      "description": "MongoDB connection URI",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git"
+    },
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  }
+}
