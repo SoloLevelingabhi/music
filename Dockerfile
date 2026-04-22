@@ -9,3 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 CMD ["python", "bot.py"]
+#CMD gunicorn app:app & python3 main.py
