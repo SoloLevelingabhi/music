@@ -6,8 +6,8 @@ A professional Telegram audio editing bot with interactive color UI, built with 
 
 | Platform | Deploy Button |
 |----------|---------------|
-| **Heroku** | [![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/yourusername/smart-audio-studio-bot) |
-| **Render** | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/yourusername/smart-audio-studio-bot) |
+| **Heroku** | [![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/SoloLevelingabhi/music/tree/master) |
+| **Render** | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SoloLevelingabhi/music/tree/master) |
 | **Koyeb** | [![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=git&repository=github.com/yourusername/smart-audio-studio-bot&branch=main&name=audio-editor-bot) |
 | **Railway** | [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/your-template-id) |
 | **Zeabur** | [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/your-template-id) |
