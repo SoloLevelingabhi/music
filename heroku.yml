@@ -1,1 +1,8 @@
+build:
+  docker:
+    worker: Dockerfile
+  config:
+    REQUIREMENTS_FILENAME: requirements.txt
 
+run:
+  worker: python bot.py
