@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import config
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 try:
@@ -36,6 +36,14 @@ DEFAULT_SETTINGS = {
     "thumbnail_file_id": "",
     "watermark_file_id": "",
     "watermark_position": "end",
+}
+
+CODEC_MAP = {
+    "mp3": "libmp3lame",
+    "wav": "pcm_s16le",
+    "flac": "flac",
+    "ogg": "libvorbis",
+    "m4a": "aac",
 }
 
 
@@ -358,13 +366,6 @@ async def done_merge(_: Client, message: Message) -> None:
         output_ext = settings.get("output_format", "mp3")
         merged_file = merge_dir / f"merged_{uuid.uuid4().hex}.{output_ext}"
 
-        codec_map = {
-            "mp3": "libmp3lame",
-            "wav": "pcm_s16le",
-            "flac": "flac",
-            "ogg": "libvorbis",
-            "m4a": "aac",
-        }
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -378,7 +379,7 @@ async def done_merge(_: Client, message: Message) -> None:
             "-i",
             str(list_file),
             "-c:a",
-            codec_map.get(output_ext, "libmp3lame"),
+            CODEC_MAP.get(output_ext, "libmp3lame"),
             str(merged_file),
         ]
         ok, err = await run_ffmpeg(cmd)
@@ -510,7 +511,7 @@ async def audio_handler(_: Client, message: Message) -> None:
         out_ext = settings.get("output_format", "mp3")
         converted_file, error_text = await prepare_audio_file(source_file, out_ext)
         if not converted_file:
-            await message.reply_text(f"❌ Failed to load audio: {error_text}")
+            await message.reply_text(f"❌ Failed to convert audio: {error_text}")
             return
 
         final_audio, wm_error = await apply_watermark(converted_file, user_id)
@@ -520,7 +521,7 @@ async def audio_handler(_: Client, message: Message) -> None:
         await send_processed_file(message, final_audio, user_id)
     except Exception as exc:
         logger.exception("Audio processing failed: %s", exc)
-        await message.reply_text(f"❌ Failed to load audio: {exc}")
+        await message.reply_text(f"❌ Failed to process audio: {exc}")
     finally:
         source_file.unlink(missing_ok=True)
         if converted_file:
@@ -542,9 +543,14 @@ async def help_handler(_: Client, message: Message) -> None:
     )
 
 
-# ============================= START BOT =============================
-if __name__ == "__main__":
+async def run_bot() -> None:
     ensure_dirs()
     logger.info("🚀 Starting Music Bot...")
-    asyncio.run(store.init())
-    app.run()
+    await store.init()
+    await app.start()
+    await idle()
+    await app.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(run_bot())
