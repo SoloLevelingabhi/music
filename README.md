@@ -12,7 +12,7 @@ A professional Telegram audio editing bot with interactive color UI, built with 
 | **Railway** | [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/your-template-id) |
 | **Zeabur** | [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/your-template-id) |
 | **Fly.io** | `fly launch --image ghcr.io/yourusername/smart-audio-studio-bot` |
-| **DigitalOcean** | [![Deploy to DO](https://www.deploytodo.com/do-btn.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/yourusername/smart-audio-studio-bot/tree/main) |
+| **DigitalOcean** | [![Deploy to DO](https://www.deploytodo.com/do-btn-blue-ghost.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/yourusername/smart-audio-studio-bot/tree/main) |
 
 ## ✨ Features
 
