@@ -1,5 +1,6 @@
 {
   "name": "Smart Audio Studio Bot",
+  "stack": "heroku-24",
   "description": "Telegram audio editing bot with MongoDB",
   "repository": "",
   "keywords": ["telegram", "bot", "audio", "editor", "ffmpeg"],
