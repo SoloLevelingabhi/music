@@ -1,0 +1,16 @@
+app = "audio-editor-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  API_ID = ""
+  API_HASH = ""
+  BOT_TOKEN = ""
+  MONGO_URI = ""
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
