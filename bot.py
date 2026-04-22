@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -12,7 +13,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     AsyncIOMotorClient = None
 
 
@@ -231,7 +232,7 @@ async def apply_watermark(main_audio: Path, user_id: int) -> tuple[Path, str]:
     if position == "start":
         filter_complex = "[1:a][0:a]concat=n=2:v=0:a=1[a]"
     elif position == "both":
-        filter_complex = "[1:a][0:a][1:a]concat=n=3:v=0:a=1[a]"
+        filter_complex = "[1:a]asplit=2[w1][w2];[w1][0:a][w2]concat=n=3:v=0:a=1[a]"
     else:
         filter_complex = "[0:a][1:a]concat=n=2:v=0:a=1[a]"
 
@@ -394,10 +395,7 @@ async def done_merge(_: Client, message: Message) -> None:
         await send_processed_file(message, watermarked, user_id)
     finally:
         merge_sessions.pop(user_id, None)
-        for path in merge_dir.glob("*"):
-            if path.is_file():
-                path.unlink(missing_ok=True)
-        merge_dir.rmdir()
+        shutil.rmtree(merge_dir, ignore_errors=True)
 
 
 @app.on_callback_query()
