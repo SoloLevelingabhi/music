@@ -1,29 +1,29 @@
 # Telegram Bot Framework
-pyrofork==2.0.104
-tgcrypto==1.2.5
+pyrofork
+tgcrypto
 
 # Database
-pymongo==4.6.1
-motor==3.3.2
+pymongo
+motor
 
 # Audio Processing
-ffmpeg-python==0.2.0
-mutagen==1.47.0
-pydub==0.25.1
+ffmpeg-python
+mutagen
+pydub
 
 # Web Server (for keep-alive)
-flask==3.0.0
-gunicorn==21.2.0
+flask
+gunicorn
 
 # HTTP & Async
-aiohttp==3.9.1
-aiofiles==23.2.1
-requests==2.31.0
+aiohttp
+aiofiles
+requests
 
 # Cloud Storage (optional)
-boto3==1.34.14
-python-dotenv==1.0.0
+boto3
+python-dotenv
 
 # Utilities
-python-magic==0.4.27
-Pillow==10.1.0
+python-magic
+Pillow
