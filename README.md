@@ -2,45 +2,76 @@
 
 A professional Telegram audio editing bot with interactive color UI, built with Pyrofork and MongoDB.
 
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/yourusername/smart-audio-studio-bot)
+## 🚀 One-Click Deploy
+
+| Platform | Deploy Button |
+|----------|---------------|
+| **Heroku** | [![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/yourusername/smart-audio-studio-bot) |
+| **Render** | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/yourusername/smart-audio-studio-bot) |
+| **Koyeb** | [![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=git&repository=github.com/yourusername/smart-audio-studio-bot&branch=main&name=audio-editor-bot) |
+| **Railway** | [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/your-template-id) |
+| **Zeabur** | [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/your-template-id) |
+| **Fly.io** | `fly launch --image ghcr.io/yourusername/smart-audio-studio-bot` |
+| **DigitalOcean** | [![Deploy to DO](https://www.deploytodo.com/do-btn.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/yourusername/smart-audio-studio-bot/tree/main) |
 
 ## ✨ Features
 
 - ✂️ **Trim & Merge** - Cut and combine audio files
-- 🔊 **Volume & Speed** - Adjust volume and playback speed
+- 🔊 **Volume & Speed** - Adjust volume (0.5x-2x)
 - 🎨 **Effects** - Normalize, bass boost, noise reduction
 - 📦 **Format Conversion** - MP3, WAV, FLAC, OGG, M4A
-- 🏷️ **ID3 Tags** - Edit metadata and add thumbnails
+- 🏷️ **ID3 Tags** - Edit metadata and thumbnails
 - 💾 **Session Management** - Resume editing anytime
-- 🎯 **Preview System** - Listen before exporting
+- 🎯 **Preview System** - 15s preview before export
+- 🔄 **Undo/Redo** - Revert unwanted changes
 
-## 🚀 Quick Deploy
+## 📋 Quick Setup
 
-### One-Click Heroku Deploy
+### 1. Get Required Tokens
 
-1. Click the Deploy button above
-2. Fill in the required environment variables:
-   - `API_ID` - Get from [my.telegram.org](https://my.telegram.org)
-   - `API_HASH` - Get from [my.telegram.org](https://my.telegram.org)
-   - `BOT_TOKEN` - Get from [@BotFather](https://t.me/BotFather)
-   - `MONGO_URI` - MongoDB connection string (use [MongoDB Atlas](https://mongodb.com/atlas) free tier)
-3. Click "Deploy App"
+| Token | Source | How to Get |
+|-------|--------|------------|
+| `API_ID` | [my.telegram.org](https://my.telegram.org) | Login → Create Application |
+| `API_HASH` | [my.telegram.org](https://my.telegram.org) | Login → Create Application |
+| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) | `/newbot` → Copy token |
+| `MONGO_URI` | [MongoDB Atlas](https://mongodb.com/atlas) | Free tier → Create cluster → Connect |
 
-### Manual Deployment
+### 2. Deploy to Platform
+
+Choose any platform above and fill the required environment variables.
+
+### 3. FFmpeg Setup by Platform
+
+| Platform | FFmpeg Installation |
+|----------|---------------------|
+| **Heroku** | Add buildpack: `heroku buildpacks:add https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git` |
+| **Render** | Uses Dockerfile (FFmpeg pre-installed) |
+| **Koyeb** | Uses Dockerfile (FFmpeg pre-installed) |
+| **Railway** | Uses nixpacks (auto-detects FFmpeg) |
+| **Zeabur** | Auto-installs via apt |
+
+## 🛠️ Local Development
 
 ```bash
-# Clone repo
+# Clone repository
 git clone https://github.com/yourusername/smart-audio-studio-bot
 cd smart-audio-studio-bot
 
-# Install dependencies
+# Install FFmpeg
+# Ubuntu/Debian: sudo apt install ffmpeg
+# macOS: brew install ffmpeg
+# Windows: Download from ffmpeg.org
+
+# Install Python dependencies
 pip install -r requirements.txt
 
-# Set environment variables
-export API_ID="your_api_id"
-export API_HASH="your_api_hash"
-export BOT_TOKEN="your_bot_token"
-export MONGO_URI="your_mongodb_uri"
+# Create .env file
+cat > .env << EOF
+API_ID=your_api_id
+API_HASH=your_api_hash
+BOT_TOKEN=your_bot_token
+MONGO_URI=mongodb://localhost:27017
+EOF
 
 # Run bot
 python bot.py
