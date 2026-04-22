@@ -204,7 +204,18 @@ async def prepare_audio_file(input_path: Path, output_ext: str) -> tuple[Path | 
         output_path = config.CACHE_DIR / f"{uuid.uuid4().hex}.{output_ext}"
         output_path.unlink(missing_ok=True)
 
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), str(output_path)]
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(input_path),
+            "-c:a",
+            CODEC_MAP.get(output_ext, "libmp3lame"),
+            str(output_path),
+        ]
         ok, err = await run_ffmpeg(cmd)
         if ok and output_path.exists() and output_path.stat().st_size > 0:
             return output_path, ""
@@ -361,7 +372,8 @@ async def done_merge(_: Client, message: Message) -> None:
         list_file = merge_dir / "inputs.txt"
         with list_file.open("w", encoding="utf-8") as f:
             for p in local_paths:
-                f.write(f"file '{p.as_posix()}'\n")
+                safe_path = str(p.resolve()).replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
 
         settings = await store.get(user_id)
         output_ext = settings.get("output_format", "mp3")
