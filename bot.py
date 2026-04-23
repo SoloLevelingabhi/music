@@ -1,23 +1,15 @@
-"""
-╔══════════════════════════════════════════════════════════════════════════╗
-║                      MUSIC BOT —                                         ║
-║                                                                          ║
-║  Telegram Audio Editing Bot - Complete Rewritten Version                 ║
-║  All features working: trim, speed, merge, insert at position            ║
-║                                                                          ║
-║  Sponsored by  : MUSIC                                                   ║
-║  Developed by  : DEVA                                                    ║
-║  Version       : 6.1                                                     ║
-║  License       : MIT                                                     ║
-╚══════════════════════════════════════════════════════════════════════════╝
-"""
 #!/usr/bin/env python3
 """
-Telegram Audio Editing Bot - Complete Fixed Version
-All features working: auto-processing, text replacement, watermark, etc.
+Telegram Audio Editing Bot - Enhanced Version
+- Auto/Manual mode toggle
+- Owner-only /restart and /stats
+- Extended speed (0.25x-4x) and volume (25%-600%)
+- Fixed NoneType replace error
+- Settings values visible in buttons
 """
 
 import os
+import sys
 import logging
 import traceback
 import asyncio
@@ -25,8 +17,9 @@ import tempfile
 import shutil
 import subprocess
 import re
+import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import json
 
 # Core libraries
@@ -77,7 +70,8 @@ app = Client(
     "audio_editor_bot",
     bot_token=BOT_TOKEN,
     api_id=API_ID,
-    api_hash=API_HASH
+    api_hash=API_HASH,
+    workers=10  # Increase concurrent downloads
 )
 
 # MongoDB connection
@@ -87,6 +81,9 @@ sessions_collection = db.sessions
 settings_collection = db.settings
 watermarks_collection = db.watermarks
 text_replacements_collection = db.text_replacements
+
+# Bot start time for /stats
+BOT_START_TIME = time.time()
 
 # ==================== FFMPEG HELPER FUNCTIONS ====================
 
@@ -177,7 +174,7 @@ def trim_audio(input_path: str, output_path: str, start_seconds: float, end_seco
     os.remove(temp_output)
 
 def change_volume(input_path: str, output_path: str, factor: float):
-    """Change volume"""
+    """Change volume (0.25 to 6.0)"""
     cmd = [
         'ffmpeg', '-i', input_path,
         '-filter:a', f'volume={factor}',
@@ -186,37 +183,31 @@ def change_volume(input_path: str, output_path: str, factor: float):
     subprocess.run(cmd, check=True, capture_output=True)
 
 def change_speed(input_path: str, output_path: str, speed: float):
-    """Change speed"""
+    """Change speed (0.25 to 4.0)"""
     if speed == 1.0:
         shutil.copy(input_path, output_path)
         return
     
     temp_output = tempfile.mktemp(suffix=".mp3")
     
-    if 0.5 <= speed <= 2.0:
-        cmd = [
-            'ffmpeg', '-i', input_path,
-            '-filter:a', f'atempo={speed}',
-            '-y', temp_output
-        ]
-    else:
-        filters = []
-        remaining = speed
-        while remaining > 2.0:
-            filters.append('atempo=2.0')
-            remaining /= 2.0
-        while remaining < 0.5:
-            filters.append('atempo=0.5')
-            remaining /= 0.5
-        if remaining != 1.0:
-            filters.append(f'atempo={remaining}')
-        
-        filter_chain = ','.join(filters)
-        cmd = [
-            'ffmpeg', '-i', input_path,
-            '-filter:a', filter_chain,
-            '-y', temp_output
-        ]
+    # Build atempo filter chain
+    filters = []
+    remaining = speed
+    while remaining > 2.0:
+        filters.append('atempo=2.0')
+        remaining /= 2.0
+    while remaining < 0.5:
+        filters.append('atempo=0.5')
+        remaining /= 0.5
+    if remaining != 1.0:
+        filters.append(f'atempo={remaining}')
+    
+    filter_chain = ','.join(filters)
+    cmd = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', filter_chain,
+        '-y', temp_output
+    ]
     
     subprocess.run(cmd, check=True, capture_output=True)
     safe_convert_audio(temp_output, output_path)
@@ -341,9 +332,11 @@ def apply_watermark(main_audio: str, watermark_audio: str, output_path: str, pos
     safe_convert_audio(temp_output, output_path)
     os.remove(temp_output)
 
-def apply_text_replacements(text: str, replacements: List[dict]) -> str:
-    """Apply text replacements to filename or caption"""
-    result = text
+def apply_text_replacements(text: Optional[str], replacements: List[dict]) -> str:
+    """Apply text replacements to filename or caption, handling None safely"""
+    if text is None:
+        return "Audio"
+    result = str(text)
     for replacement in replacements:
         if replacement.get('enabled', True):
             pattern = replacement.get('find', '')
@@ -360,10 +353,10 @@ async def get_user_settings(user_id: int) -> dict:
     if not settings:
         settings = {
             "user_id": user_id,
+            "mode": "manual",  # "auto" or "manual"
             "default_format": "mp3",
             "default_compression": "medium",
             "auto_metadata": True,
-            "auto_apply_edits": True,
             "reuse_thumbnail": False,
             "watermark_position": "start",
             "watermark_enabled": False,
@@ -679,7 +672,7 @@ async def add_metadata_to_audio(audio_path: str, metadata: dict, thumbnail_path:
 # ==================== KEYBOARD MENUS ====================
 
 def get_main_menu():
-    """Main menu without style parameter"""
+    """Main menu"""
     buttons = [
         [
             InlineKeyboardButton('✂️ Trim', callback_data='trim'),
@@ -710,27 +703,30 @@ def get_main_menu():
     return InlineKeyboardMarkup(buttons)
 
 def get_settings_menu(settings: dict):
-    """Settings menu with auto-apply options"""
-    auto_apply_status = "✅ ON" if settings.get('auto_apply_edits') else "❌ OFF"
-    auto_trim_status = "✅" if settings.get('auto_trim_start') is not None else "❌"
-    auto_volume_status = f"{int(settings.get('auto_volume', 1.0)*100)}%" if settings.get('auto_volume') else "OFF"
-    auto_speed_status = f"{settings.get('auto_speed', 1.0)}x" if settings.get('auto_speed') else "OFF"
+    """Settings menu with current values displayed"""
+    mode = settings.get('mode', 'manual').upper()
+    auto_trim = f"{settings.get('auto_trim_start', '?')}-{settings.get('auto_trim_end', '?')}s" if settings.get('auto_trim_start') else "OFF"
+    auto_vol = f"{int(settings.get('auto_volume', 1.0)*100)}%" if settings.get('auto_volume') else "OFF"
+    auto_speed = f"{settings.get('auto_speed', '?')}x" if settings.get('auto_speed') else "OFF"
+    auto_norm = "✅" if settings.get('auto_normalize') else "❌"
+    auto_bass = "✅" if settings.get('auto_bass_boost') else "❌"
+    watermark = "✅" if settings.get('watermark_enabled') else "❌"
     
     buttons = [
         [
-            InlineKeyboardButton(f'🤖 Auto Apply {auto_apply_status}', callback_data='toggle_auto_apply')
+            InlineKeyboardButton(f'🤖 Mode: {mode}', callback_data='toggle_mode')
         ],
         [
-            InlineKeyboardButton(f'✂️ Auto Trim {auto_trim_status}', callback_data='set_auto_trim'),
-            InlineKeyboardButton(f'🔊 Auto Vol {auto_volume_status}', callback_data='set_auto_volume')
+            InlineKeyboardButton(f'✂️ Auto Trim: {auto_trim}', callback_data='set_auto_trim'),
+            InlineKeyboardButton(f'🔊 Auto Vol: {auto_vol}', callback_data='set_auto_volume')
         ],
         [
-            InlineKeyboardButton(f'⚡ Auto Speed {auto_speed_status}', callback_data='set_auto_speed'),
-            InlineKeyboardButton(f'✨ Auto Normalize', callback_data='toggle_auto_normalize')
+            InlineKeyboardButton(f'⚡ Auto Speed: {auto_speed}', callback_data='set_auto_speed'),
+            InlineKeyboardButton(f'✨ Normalize: {auto_norm}', callback_data='toggle_auto_normalize')
         ],
         [
-            InlineKeyboardButton(f'🎸 Auto Bass Boost', callback_data='toggle_auto_bass'),
-            InlineKeyboardButton(f'🎙️ Watermark', callback_data='watermark_settings')
+            InlineKeyboardButton(f'🎸 Bass Boost: {auto_bass}', callback_data='toggle_auto_bass'),
+            InlineKeyboardButton(f'🎙️ Watermark: {watermark}', callback_data='watermark_settings')
         ],
         [
             InlineKeyboardButton('🔙 Back', callback_data='back'),
@@ -786,35 +782,50 @@ def get_watermark_menu(settings: dict, watermark_exists: bool):
     return InlineKeyboardMarkup(buttons)
 
 def get_volume_menu():
+    """Volume menu with expanded range 25%-600%"""
     buttons = [
         [
-            InlineKeyboardButton('🔇 50%', callback_data='vol_0.5'),
-            InlineKeyboardButton('🔉 75%', callback_data='vol_0.75'),
-            InlineKeyboardButton('🔊 100%', callback_data='vol_1.0')
+            InlineKeyboardButton('25%', callback_data='vol_0.25'),
+            InlineKeyboardButton('50%', callback_data='vol_0.5'),
+            InlineKeyboardButton('75%', callback_data='vol_0.75'),
+            InlineKeyboardButton('100%', callback_data='vol_1.0')
         ],
         [
-            InlineKeyboardButton('📢 125%', callback_data='vol_1.25'),
-            InlineKeyboardButton('🔊 150%', callback_data='vol_1.5'),
-            InlineKeyboardButton('💥 200%', callback_data='vol_2.0')
+            InlineKeyboardButton('150%', callback_data='vol_1.5'),
+            InlineKeyboardButton('200%', callback_data='vol_2.0'),
+            InlineKeyboardButton('300%', callback_data='vol_3.0'),
+            InlineKeyboardButton('400%', callback_data='vol_4.0')
         ],
         [
-            InlineKeyboardButton('✨ Normalize', callback_data='normalize'),
+            InlineKeyboardButton('500%', callback_data='vol_5.0'),
+            InlineKeyboardButton('600%', callback_data='vol_6.0'),
+            InlineKeyboardButton('✨ Normalize', callback_data='normalize')
+        ],
+        [
             InlineKeyboardButton('🔙 Back', callback_data='back')
         ]
     ]
     return InlineKeyboardMarkup(buttons)
 
 def get_speed_menu():
+    """Speed menu with expanded range 0.25x-4x"""
     buttons = [
         [
-            InlineKeyboardButton('🐢 0.5x', callback_data='speed_0.5'),
-            InlineKeyboardButton('🚶 0.75x', callback_data='speed_0.75'),
-            InlineKeyboardButton('🏃 1.25x', callback_data='speed_1.25')
+            InlineKeyboardButton('0.25x', callback_data='speed_0.25'),
+            InlineKeyboardButton('0.5x', callback_data='speed_0.5'),
+            InlineKeyboardButton('0.75x', callback_data='speed_0.75'),
+            InlineKeyboardButton('1.0x', callback_data='speed_1.0')
         ],
         [
-            InlineKeyboardButton('⚡ 1.5x', callback_data='speed_1.5'),
-            InlineKeyboardButton('💨 2.0x', callback_data='speed_2.0'),
-            InlineKeyboardButton('🔥 3.0x', callback_data='speed_3.0')
+            InlineKeyboardButton('1.25x', callback_data='speed_1.25'),
+            InlineKeyboardButton('1.5x', callback_data='speed_1.5'),
+            InlineKeyboardButton('2.0x', callback_data='speed_2.0'),
+            InlineKeyboardButton('2.5x', callback_data='speed_2.5')
+        ],
+        [
+            InlineKeyboardButton('3.0x', callback_data='speed_3.0'),
+            InlineKeyboardButton('3.5x', callback_data='speed_3.5'),
+            InlineKeyboardButton('4.0x', callback_data='speed_4.0')
         ],
         [
             InlineKeyboardButton('🔙 Back', callback_data='back')
@@ -906,6 +917,68 @@ def get_merge_menu():
     ]
     return InlineKeyboardMarkup(buttons)
 
+# ==================== EXPORT FUNCTION ====================
+
+async def process_and_export(user_id: int, session: dict, status_msg: Message, original_message: Message = None):
+    """Central export processing function"""
+    try:
+        processed_path = await apply_all_edits(session["current_file"], session.get("edits", []))
+        
+        settings = await get_user_settings(user_id)
+        watermark = await get_user_watermark(user_id)
+        
+        if settings.get('watermark_enabled') and watermark:
+            watermarked_path = tempfile.mktemp(suffix="_watermarked.mp3")
+            apply_watermark(
+                processed_path,
+                watermark["file_path"],
+                watermarked_path,
+                settings.get('watermark_position', 'start')
+            )
+            if os.path.exists(processed_path):
+                os.remove(processed_path)
+            processed_path = watermarked_path
+        
+        if session.get("metadata"):
+            processed_path = await add_metadata_to_audio(
+                processed_path,
+                session["metadata"],
+                session.get("thumbnail_path")
+            )
+        
+        replacements = await get_text_replacements(user_id)
+        original_filename = session.get("original_filename", "Edited Audio")
+        title = session.get("metadata", {}).get("title", original_filename)
+        title = apply_text_replacements(title, replacements)
+        
+        caption = "✅ **Export complete!**\n\n"
+        if session.get("edits"):
+            caption += f"📝 Edits applied: {len(session['edits'])}\n"
+        if settings.get('watermark_enabled'):
+            caption += f"🎙️ Watermark: {settings.get('watermark_position', 'start').upper()}\n"
+        if replacements:
+            active_count = len([r for r in replacements if r.get('enabled', True)])
+            caption += f"📝 Text replacements: {active_count} active\n"
+        caption += "\nThank you for using Audio Studio Bot! 🎵"
+        
+        await status_msg.reply_audio(
+            audio=processed_path,
+            title=title,
+            performer=session.get("metadata", {}).get("artist", "Audio Editor Bot"),
+            caption=caption
+        )
+        
+        await status_msg.delete()
+        
+        if os.path.exists(processed_path):
+            os.remove(processed_path)
+        
+        return True
+    except Exception as e:
+        logger.error(f"Export error: {traceback.format_exc()}")
+        await status_msg.edit_text(f"❌ Export failed: {str(e)}")
+        return False
+
 # ==================== COMMAND HANDLERS ====================
 
 @app.on_message(filters.command("start"))
@@ -921,19 +994,13 @@ I'm your professional audio editing assistant.
 🔀 Merge Audios | 🎙️ Watermark Audio
 📝 Metadata & Thumbnails | 📝 Text Replacement
 
-**Auto-Processing:**
-- Enable auto-apply in settings
-- Bot automatically applies your preferred edits
-- Real-time notifications of applied changes
-
-**Text Replacement:**
-- Remove or replace words in filenames/captions
-- Multiple replacement rules
-- Toggle rules on/off
+**Modes:**
+🤖 **Auto Mode**: Automatically applies your saved settings and exports immediately.
+👤 **Manual Mode**: Choose edits step by step with full control.
 
 **Commands:**
 /start - Start bot
-/settings - Configure auto-apply settings
+/settings - Configure auto-apply settings and toggle mode
 /merge - Quick merge access
 /watermark - Watermark settings
 /reset - Reset session
@@ -947,13 +1014,18 @@ async def settings_command(client: Client, message: Message):
     user_id = message.from_user.id
     settings = await get_user_settings(user_id)
     
+    mode_text = "🤖 AUTO (Instant Export)" if settings.get('mode') == 'auto' else "👤 MANUAL (Step by Step)"
+    auto_trim = f"{settings.get('auto_trim_start', '?')}s - {settings.get('auto_trim_end', '?')}s" if settings.get('auto_trim_start') else "OFF"
+    auto_vol = f"{int(settings.get('auto_volume', 1.0)*100)}%" if settings.get('auto_volume') else "OFF"
+    auto_speed = f"{settings.get('auto_speed', '?')}x" if settings.get('auto_speed') else "OFF"
+    
     settings_text = f"""
 ⚙️ **Your Settings**
 
-🤖 Auto Apply: `{'ON' if settings.get('auto_apply_edits') else 'OFF'}`
-✂️ Auto Trim: `{settings.get('auto_trim_start', 'Not set')}s - {settings.get('auto_trim_end', 'Not set')}s`
-🔊 Auto Volume: `{int(settings.get('auto_volume', 1.0)*100) if settings.get('auto_volume') else 'OFF'}%`
-⚡ Auto Speed: `{settings.get('auto_speed', 'OFF')}x`
+🤖 Mode: `{mode_text}`
+✂️ Auto Trim: `{auto_trim}`
+🔊 Auto Volume: `{auto_vol}`
+⚡ Auto Speed: `{auto_speed}`
 ✨ Auto Normalize: `{'ON' if settings.get('auto_normalize') else 'OFF'}`
 🎸 Auto Bass Boost: `{'ON' if settings.get('auto_bass_boost') else 'OFF'}`
 🎙️ Watermark: `{'ON' if settings.get('watermark_enabled') else 'OFF'}`
@@ -1001,7 +1073,46 @@ async def watermark_command(client: Client, message: Message):
         reply_markup=get_watermark_menu(settings, watermark is not None)
     )
 
-# ==================== AUDIO HANDLER WITH AUTO-PROCESSING ====================
+@app.on_message(filters.command("restart") & filters.user(OWNER_ID))
+async def restart_command(client: Client, message: Message):
+    """Owner-only restart command"""
+    await message.reply_text("🔄 Restarting bot...")
+    os.execv(sys.executable, ['python'] + sys.argv)
+
+@app.on_message(filters.command("stats") & filters.user(OWNER_ID))
+async def stats_command(client: Client, message: Message):
+    """Owner-only stats command"""
+    uptime_seconds = int(time.time() - BOT_START_TIME)
+    uptime_str = str(timedelta(seconds=uptime_seconds))
+    
+    # Count total users (approximate)
+    user_count = await settings_collection.count_documents({})
+    session_count = await sessions_collection.count_documents({})
+    
+    # Disk usage
+    total_size = 0
+    for directory in [DOWNLOAD_DIR, CACHE_DIR, TEMP_DIR, WATERMARK_DIR]:
+        for dirpath, dirnames, filenames in os.walk(directory):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if os.path.exists(fp):
+                    total_size += os.path.getsize(fp)
+    
+    size_mb = total_size / (1024 * 1024)
+    
+    stats_text = f"""
+📊 **Bot Statistics**
+
+⏱ **Uptime:** `{uptime_str}`
+👥 **Total Users:** `{user_count}`
+📁 **Active Sessions:** `{session_count}`
+💾 **Cache Size:** `{size_mb:.1f} MB`
+
+🚀 **Bot Status:** Online
+    """
+    await message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+
+# ==================== AUDIO HANDLER WITH AUTO/MANUAL MODE ====================
 
 @app.on_message(filters.audio | filters.voice)
 async def handle_audio(client: Client, message: Message):
@@ -1079,11 +1190,14 @@ async def handle_audio(client: Client, message: Message):
             )
             return
         
-        # NORMAL AUDIO PROCESSING - Apply auto edits if enabled
+        # NORMAL AUDIO PROCESSING
         current_path = audio_path
         changes_applied = []
         
-        if settings.get('auto_apply_edits'):
+        # Apply auto edits if any are configured (regardless of mode)
+        if (settings.get('auto_trim_start') or settings.get('auto_volume') or 
+            settings.get('auto_speed') or settings.get('auto_normalize') or 
+            settings.get('auto_bass_boost') or settings.get('watermark_enabled')):
             current_path, changes_applied = await apply_auto_edits(audio_path, settings, user_id)
         
         session["current_file"] = current_path
@@ -1105,15 +1219,19 @@ async def handle_audio(client: Client, message: Message):
             info_text += f"\n\n✨ **Auto-applied changes:**\n"
             for change in changes_applied:
                 info_text += f"• {change}\n"
+        
+        # Check mode
+        if settings.get('mode') == 'auto':
+            # AUTO MODE: Export immediately
+            info_text += f"\n\n🤖 **Auto Mode active - Exporting now...**"
+            await processing_msg.edit_text(info_text, parse_mode=ParseMode.MARKDOWN)
+            
+            # Process and export
+            await process_and_export(user_id, session, processing_msg, message)
         else:
-            if settings.get('auto_apply_edits'):
-                info_text += f"\n\nℹ️ No auto edits configured. Use /settings to set them up."
-            else:
-                info_text += f"\n\nℹ️ Auto-apply is OFF. Enable it in /settings for automatic processing."
-        
-        info_text += f"\n\nNow choose an editing option from the menu below:"
-        
-        await processing_msg.edit_text(info_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu())
+            # MANUAL MODE: Show editing menu
+            info_text += f"\n\n👤 **Manual Mode** - Choose an editing option below:"
+            await processing_msg.edit_text(info_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu())
         
     except Exception as e:
         logger.error(f"Audio handling error: {traceback.format_exc()}")
@@ -1159,6 +1277,18 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     if data == "back":
         await message.edit_reply_markup(reply_markup=get_main_menu())
         await callback_query.answer()
+        return
+    
+    # ==================== MODE TOGGLE ====================
+    
+    if data == "toggle_mode":
+        settings = await get_user_settings(user_id)
+        current_mode = settings.get('mode', 'manual')
+        new_mode = 'auto' if current_mode == 'manual' else 'manual'
+        await update_user_settings(user_id, {"mode": new_mode})
+        settings = await get_user_settings(user_id)
+        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
+        await callback_query.answer(f"Mode switched to {new_mode.upper()}", show_alert=True)
         return
     
     # ==================== TEXT REPLACEMENT HANDLERS ====================
@@ -1257,15 +1387,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
     
-    if data == "toggle_auto_apply":
-        settings = await get_user_settings(user_id)
-        new_value = not settings.get('auto_apply_edits', True)
-        await update_user_settings(user_id, {"auto_apply_edits": new_value})
-        settings = await get_user_settings(user_id)
-        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
-        await callback_query.answer(f"Auto-apply {'enabled' if new_value else 'disabled'}")
-        return
-    
     if data == "set_auto_trim":
         await callback_query.answer()
         
@@ -1297,7 +1418,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         
         response = await client.ask(
             chat_id=message.chat.id,
-            text="🔊 **Set Auto Volume**\n\nSend volume percentage (50-200).\nExample: `150` for 150%\n\nSend `off` to disable.",
+            text="🔊 **Set Auto Volume**\n\nSend volume percentage (25-600).\nExample: `150` for 150%\n\nSend `off` to disable.",
             timeout=60
         )
         
@@ -1306,12 +1427,13 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             await response.reply_text("✅ Auto volume disabled.")
         else:
             try:
-                volume = float(response.text) / 100
-                if 0.5 <= volume <= 2.0:
+                percent = float(response.text)
+                volume = percent / 100
+                if 0.25 <= volume <= 6.0:
                     await update_user_settings(user_id, {"auto_volume": volume})
-                    await response.reply_text(f"✅ Auto volume set to {response.text}%")
+                    await response.reply_text(f"✅ Auto volume set to {int(percent)}%")
                 else:
-                    await response.reply_text("❌ Volume must be between 50 and 200")
+                    await response.reply_text("❌ Volume must be between 25% and 600%")
             except:
                 await response.reply_text("❌ Invalid number!")
         
@@ -1324,7 +1446,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         
         response = await client.ask(
             chat_id=message.chat.id,
-            text="⚡ **Set Auto Speed**\n\nSend speed (0.5 to 3.0).\nExamples: `0.5`, `1.5`, `2.0`\n\nSend `off` to disable.",
+            text="⚡ **Set Auto Speed**\n\nSend speed (0.25 to 4.0).\nExamples: `0.5`, `1.5`, `2.0`\n\nSend `off` to disable.",
             timeout=60
         )
         
@@ -1334,11 +1456,11 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         else:
             try:
                 speed = float(response.text)
-                if 0.5 <= speed <= 3.0:
+                if 0.25 <= speed <= 4.0:
                     await update_user_settings(user_id, {"auto_speed": speed})
                     await response.reply_text(f"✅ Auto speed set to {speed}x")
                 else:
-                    await response.reply_text("❌ Speed must be between 0.5 and 3.0")
+                    await response.reply_text("❌ Speed must be between 0.25 and 4.0")
             except:
                 await response.reply_text("❌ Invalid number!")
         
@@ -1407,7 +1529,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             session["edits"] = []
         session["edits"].append(edit)
         await update_user_session(user_id, session)
-        await callback_query.answer(f"Volume set to {factor}x", show_alert=True)
+        await callback_query.answer(f"Volume set to {int(factor*100)}%", show_alert=True)
         await message.edit_reply_markup(reply_markup=get_main_menu())
     
     elif data == "speed":
@@ -1738,63 +1860,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             return
         
         status_msg = await message.reply_text("🎨 **Processing your audio...**")
-        
-        try:
-            processed_path = await apply_all_edits(session["current_file"], session.get("edits", []))
-            
-            settings = await get_user_settings(user_id)
-            watermark = await get_user_watermark(user_id)
-            
-            if settings.get('watermark_enabled') and watermark:
-                watermarked_path = tempfile.mktemp(suffix="_watermarked.mp3")
-                apply_watermark(
-                    processed_path,
-                    watermark["file_path"],
-                    watermarked_path,
-                    settings.get('watermark_position', 'start')
-                )
-                if os.path.exists(processed_path):
-                    os.remove(processed_path)
-                processed_path = watermarked_path
-            
-            if session.get("metadata"):
-                processed_path = await add_metadata_to_audio(
-                    processed_path,
-                    session["metadata"],
-                    session.get("thumbnail_path")
-                )
-            
-            replacements = await get_text_replacements(user_id)
-            original_filename = session.get("original_filename", "Edited Audio")
-            title = session.get("metadata", {}).get("title", original_filename)
-            title = apply_text_replacements(title, replacements)
-            
-            caption = "✅ **Export complete!**\n\n"
-            if session.get("edits"):
-                caption += f"📝 Edits applied: {len(session['edits'])}\n"
-            if settings.get('watermark_enabled'):
-                caption += f"🎙️ Watermark: {settings.get('watermark_position', 'start').upper()}\n"
-            if replacements:
-                active_count = len([r for r in replacements if r.get('enabled', True)])
-                caption += f"📝 Text replacements: {active_count} active\n"
-            caption += "\nThank you for using Audio Studio Bot! 🎵"
-            
-            await message.reply_audio(
-                audio=processed_path,
-                title=title,
-                performer=session.get("metadata", {}).get("artist", "Audio Editor Bot"),
-                caption=caption
-            )
-            
-            await status_msg.delete()
-            await callback_query.answer("Export completed!")
-            
-            if os.path.exists(processed_path):
-                os.remove(processed_path)
-                
-        except Exception as e:
-            logger.error(f"Export error: {traceback.format_exc()}")
-            await status_msg.edit_text(f"❌ Export failed: {str(e)}")
+        await process_and_export(user_id, session, status_msg)
+        await callback_query.answer("Export completed!")
     
     elif data == "reset":
         await delete_user_session(user_id)
@@ -1854,7 +1921,7 @@ def notify_owner():
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         data = {
             "chat_id": OWNER_ID,
-            "text": "🤖 **Audio Studio Bot v6.0 is Live!**\n\n✅ Auto-apply edits\n✅ Text replacement\n✅ Watermark\n✅ Real-time notifications\n\nSend /start to begin!",
+            "text": "🤖 **Audio Studio Bot v6.2 is Live!**\n\n✅ Auto/Manual Mode Toggle\n✅ Settings values visible\n✅ Speed: 0.25x-4x | Volume: 25%-600%\n✅ Owner commands: /restart, /stats\n\nSend /start to begin!",
             "parse_mode": "Markdown"
         }
         requests.post(url, json=data)
@@ -1868,7 +1935,7 @@ def reset_and_set_commands():
         requests.post(url, json={"commands": []})
         commands = [
             {"command": "start", "description": "🚀 Start the bot"},
-            {"command": "settings", "description": "⚙️ Auto-apply settings"},
+            {"command": "settings", "description": "⚙️ Settings & Mode toggle"},
             {"command": "merge", "description": "🔀 Merge audio files"},
             {"command": "watermark", "description": "🎙️ Watermark settings"},
             {"command": "reset", "description": "♻️ Reset session"},
@@ -1888,5 +1955,21 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(cleanup_old_files())
     
-    logger.info("Starting Audio Studio Bot v6.0...")
+    logger.info("Starting Audio Studio Bot v6.2 ...")
     app.run()
+
+"""
+╔══════════════════════════════════════════════════════════════════════════╗
+║                      MUSIC BOT —                                         ║
+║                                                                          ║
+║  Telegram Audio Editing Bot - Complete Rewritten Version                 ║
+║  All features working: trim, speed, merge, insert at position            ║
+║                                                                          ║
+║  Sponsored by  : MUSIC                                                   ║
+║  Developed by  : DEVA                                                    ║
+║  Version       : 6.2                                                     ║
+║  License       : MIT                                                     ║
+╚══════════════════════════════════════════════════════════════════════════╝
+"""
+
+
