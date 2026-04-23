@@ -7,15 +7,14 @@
 ║                                                                          ║
 ║  Sponsored by  : MUSIC                                                   ║
 ║  Developed by  : DEVA                                                    ║
-║  Version       : 6.0                                                    ║
+║  Version       : 6.1                                                     ║
 ║  License       : MIT                                                     ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
-
 #!/usr/bin/env python3
 """
-Telegram Audio Editing Bot - Complete with Auto-Processing & Text Replacement
-Features: Auto-apply settings, Real-time notifications, Text replace in filename/caption
+Telegram Audio Editing Bot - Complete Fixed Version
+All features working: auto-processing, text replacement, watermark, etc.
 """
 
 import os
@@ -364,7 +363,7 @@ async def get_user_settings(user_id: int) -> dict:
             "default_format": "mp3",
             "default_compression": "medium",
             "auto_metadata": True,
-            "auto_apply_edits": True,  # New: Auto-apply edits from settings
+            "auto_apply_edits": True,
             "reuse_thumbnail": False,
             "watermark_position": "start",
             "watermark_enabled": False,
@@ -497,14 +496,11 @@ async def download_audio(file_id: str, user_id: int) -> tuple:
             logger.info(f"Using cached file for {file_id}")
             return cache_path, None
         
-        # Download file to temp location
         temp_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_{file_id}")
         downloaded = await app.download_media(file_id, file_name=temp_path)
         
-        # Get original filename
         original_filename = os.path.basename(downloaded) if downloaded else None
         
-        # Validate downloaded file
         if not validate_audio_file(downloaded):
             logger.warning(f"Downloaded file may be corrupted, attempting repair: {downloaded}")
             repaired_path = tempfile.mktemp(suffix=".mp3")
@@ -514,7 +510,6 @@ async def download_audio(file_id: str, user_id: int) -> tuple:
             else:
                 raise Exception("Downloaded audio file is corrupted")
         
-        # Convert to standard format
         safe_convert_audio(downloaded, cache_path)
         
         if os.path.exists(downloaded):
@@ -524,6 +519,52 @@ async def download_audio(file_id: str, user_id: int) -> tuple:
     except Exception as e:
         logger.error(f"Download error: {e}")
         raise
+
+async def apply_all_edits(audio_path: str, edits: List[dict]) -> str:
+    """Apply all edits in sequence"""
+    current_path = audio_path
+    temp_files = []
+    
+    for i, edit in enumerate(edits):
+        edit_type = edit.get("type")
+        output_path = tempfile.mktemp(suffix=f"_edit_{i}.mp3")
+        temp_files.append(output_path)
+        
+        try:
+            if edit_type == "trim":
+                trim_audio(current_path, output_path, 
+                          edit.get("start", 0), 
+                          edit.get("end", 60))
+            elif edit_type == "volume":
+                change_volume(current_path, output_path, edit.get("factor", 1.0))
+            elif edit_type == "speed":
+                change_speed(current_path, output_path, edit.get("speed", 1.0))
+            elif edit_type == "normalize":
+                normalize_audio(current_path, output_path)
+            elif edit_type == "bass_boost":
+                bass_boost(current_path, output_path)
+            elif edit_type == "compress":
+                compress_audio(current_path, output_path, edit.get("bitrate", "128k"))
+            elif edit_type == "convert":
+                convert_format(current_path, output_path, edit.get("format", "mp3"))
+            
+            if current_path != audio_path and os.path.exists(current_path):
+                os.remove(current_path)
+            
+            current_path = output_path
+            
+        except Exception as e:
+            logger.error(f"Edit error for {edit_type}: {e}")
+            raise
+    
+    final_output = tempfile.mktemp(suffix=".mp3")
+    shutil.copy(current_path, final_output)
+    
+    for temp_file in temp_files:
+        if os.path.exists(temp_file) and temp_file != current_path:
+            os.remove(temp_file)
+    
+    return final_output
 
 async def apply_auto_edits(audio_path: str, settings: dict, user_id: int) -> tuple:
     """Apply automatic edits based on user settings, return (processed_path, changes_applied)"""
@@ -543,7 +584,7 @@ async def apply_auto_edits(audio_path: str, settings: dict, user_id: int) -> tup
     if settings.get('auto_volume') is not None and settings['auto_volume'] != 1.0:
         output_path = tempfile.mktemp(suffix="_volume.mp3")
         change_volume(current_path, output_path, settings['auto_volume'])
-        changes.append(f"🔊 Volume adjusted to {settings['auto_volume']*100}%")
+        changes.append(f"🔊 Volume adjusted to {int(settings['auto_volume']*100)}%")
         if current_path != audio_path:
             os.remove(current_path)
         current_path = output_path
@@ -593,10 +634,52 @@ async def apply_auto_edits(audio_path: str, settings: dict, user_id: int) -> tup
     
     return current_path, changes
 
+async def add_metadata_to_audio(audio_path: str, metadata: dict, thumbnail_path: str = None) -> str:
+    """Add metadata and thumbnail"""
+    if metadata:
+        audio = mutagen.File(audio_path, easy=True)
+        if metadata.get("title"):
+            audio['title'] = metadata["title"]
+        if metadata.get("artist"):
+            audio['artist'] = metadata["artist"]
+        if metadata.get("album"):
+            audio['album'] = metadata["album"]
+        if metadata.get("genre"):
+            audio['genre'] = metadata["genre"]
+        if metadata.get("year"):
+            audio['date'] = metadata["year"]
+        audio.save()
+    
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            id3 = ID3(audio_path)
+            with open(thumbnail_path, 'rb') as f:
+                id3.add(APIC(
+                    encoding=3,
+                    mime='image/jpeg',
+                    type=3,
+                    desc='Cover',
+                    data=f.read()
+                ))
+            id3.save()
+        except:
+            id3 = ID3()
+            with open(thumbnail_path, 'rb') as f:
+                id3.add(APIC(
+                    encoding=3,
+                    mime='image/jpeg',
+                    type=3,
+                    desc='Cover',
+                    data=f.read()
+                ))
+            id3.save(audio_path)
+    
+    return audio_path
+
 # ==================== KEYBOARD MENUS ====================
 
 def get_main_menu():
-    """Main menu with styled buttons"""
+    """Main menu without style parameter"""
     buttons = [
         [
             InlineKeyboardButton('✂️ Trim', callback_data='trim'),
@@ -619,9 +702,9 @@ def get_main_menu():
             InlineKeyboardButton('ℹ️ Info', callback_data='info')
         ],
         [
-            InlineKeyboardButton('⚙️ Settings', callback_data='settings', style=enums.ButtonStyles.SUCCESS),
-            InlineKeyboardButton('🗑 Reset', callback_data='reset', style=enums.ButtonStyles.PRIMARY),
-            InlineKeyboardButton('❌ Close', callback_data='close', style=enums.ButtonStyles.DANGER)
+            InlineKeyboardButton('⚙️ Settings', callback_data='settings'),
+            InlineKeyboardButton('🗑 Reset', callback_data='reset'),
+            InlineKeyboardButton('❌ Close', callback_data='close')
         ]
     ]
     return InlineKeyboardMarkup(buttons)
@@ -650,8 +733,8 @@ def get_settings_menu(settings: dict):
             InlineKeyboardButton(f'🎙️ Watermark', callback_data='watermark_settings')
         ],
         [
-            InlineKeyboardButton('🔙 Back', callback_data='back', style=enums.ButtonStyles.PRIMARY),
-            InlineKeyboardButton('❌ Close', callback_data='close', style=enums.ButtonStyles.DANGER)
+            InlineKeyboardButton('🔙 Back', callback_data='back'),
+            InlineKeyboardButton('❌ Close', callback_data='close')
         ]
     ]
     return InlineKeyboardMarkup(buttons)
@@ -660,9 +743,8 @@ def get_text_replace_menu(replacements: List[dict]):
     """Text replacement menu"""
     buttons = []
     
-    # Show active replacements
     if replacements:
-        for r in replacements[:5]:  # Show first 5
+        for r in replacements[:5]:
             status = "✅" if r.get('enabled', True) else "❌"
             buttons.append([
                 InlineKeyboardButton(f"{status} '{r['find']}' → '{r['replace']}'", 
@@ -939,18 +1021,15 @@ async def handle_audio(client: Client, message: Message):
     processing_msg = await message.reply_text("📥 **Downloading audio...**", parse_mode=ParseMode.MARKDOWN)
     
     try:
-        # Download audio
         audio_path, downloaded_filename = await download_audio(file_id, user_id)
         audio_info = get_audio_info(audio_path)
         
         session = await get_user_session(user_id)
         settings = await get_user_settings(user_id)
         
-        # Store original filename
-        original_name = original_filename or downloaded_filename or title
-        session["original_filename"] = original_name
+        session["original_filename"] = original_filename or downloaded_filename or title
         
-        # Check if this is for merge queue
+        # Check for merge queue
         if session.get("awaiting_merge"):
             file_name = audio.file_name or f"audio_{len(session.get('merge_queue', [])) + 1}"
             
@@ -980,7 +1059,7 @@ async def handle_audio(client: Client, message: Message):
                 await response.reply_text("Merge queue ready!", reply_markup=get_merge_menu())
             return
         
-        # Check if this is for watermark upload
+        # Check for watermark upload
         if session.get("awaiting_watermark"):
             file_name = audio.file_name or "watermark_audio"
             watermark_path = os.path.join(WATERMARK_DIR, f"watermark_{user_id}.mp3")
@@ -1007,14 +1086,12 @@ async def handle_audio(client: Client, message: Message):
         if settings.get('auto_apply_edits'):
             current_path, changes_applied = await apply_auto_edits(audio_path, settings, user_id)
         
-        # Store in session
         session["current_file"] = current_path
         session["original_file_id"] = file_id
         session["original_file_path"] = audio_path
         session["edits"] = []
         await update_user_session(user_id, session)
         
-        # Build response message
         info_text = f"""
 ✅ **Audio loaded successfully!**
 
@@ -1024,7 +1101,6 @@ async def handle_audio(client: Client, message: Message):
 🔊 **Sample Rate:** `{audio_info['sample_rate']} Hz`
         """
         
-        # Show applied changes
         if changes_applied:
             info_text += f"\n\n✨ **Auto-applied changes:**\n"
             for change in changes_applied:
@@ -1047,7 +1123,6 @@ async def handle_audio(client: Client, message: Message):
 
 @app.on_message(filters.photo)
 async def handle_thumbnail(client: Client, message: Message):
-    """Handle thumbnail uploads"""
     user_id = message.from_user.id
     session = await get_user_session(user_id)
     
@@ -1097,7 +1172,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     if data == "text_add":
         await callback_query.answer()
         
-        # Ask for word to remove
         response1 = await client.ask(
             chat_id=message.chat.id,
             text="📝 **Step 1/2**\n\nSend the word/phrase you want to REMOVE or REPLACE:\n\nExample: `badword`\n\nSend `cancel` to cancel.",
@@ -1110,7 +1184,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         
         find_text = response1.text
         
-        # Ask for replacement word
         response2 = await client.ask(
             chat_id=message.chat.id,
             text=f"📝 **Step 2/2**\n\nWord/phrase to remove: `{find_text}`\n\nSend the word/phrase to REPLACE it with:\n\nExample: `goodword`\nOr send `(empty)` to just remove it.",
@@ -1134,7 +1207,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("No replacements to remove!", show_alert=True)
             return
         
-        # Create selection menu
         buttons = []
         for r in replacements:
             buttons.append([
@@ -1668,10 +1740,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         status_msg = await message.reply_text("🎨 **Processing your audio...**")
         
         try:
-            # Apply user edits
             processed_path = await apply_all_edits(session["current_file"], session.get("edits", []))
             
-            # Apply watermark if enabled
             settings = await get_user_settings(user_id)
             watermark = await get_user_watermark(user_id)
             
@@ -1687,7 +1757,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     os.remove(processed_path)
                 processed_path = watermarked_path
             
-            # Apply metadata
             if session.get("metadata"):
                 processed_path = await add_metadata_to_audio(
                     processed_path,
@@ -1695,15 +1764,11 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     session.get("thumbnail_path")
                 )
             
-            # Apply text replacements to filename and caption
             replacements = await get_text_replacements(user_id)
             original_filename = session.get("original_filename", "Edited Audio")
             title = session.get("metadata", {}).get("title", original_filename)
-            
-            # Apply replacements to title
             title = apply_text_replacements(title, replacements)
             
-            # Generate caption with applied changes info
             caption = "✅ **Export complete!**\n\n"
             if session.get("edits"):
                 caption += f"📝 Edits applied: {len(session['edits'])}\n"
@@ -1714,7 +1779,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                 caption += f"📝 Text replacements: {active_count} active\n"
             caption += "\nThank you for using Audio Studio Bot! 🎵"
             
-            # Send the file
             await message.reply_audio(
                 audio=processed_path,
                 title=title,
@@ -1824,5 +1888,5 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(cleanup_old_files())
     
-    logger.info("Starting Audio Editor Bot v6.0...")
+    logger.info("Starting Audio Studio Bot v6.0...")
     app.run()
