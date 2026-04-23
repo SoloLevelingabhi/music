@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Telegram Audio Editing Bot - Enhanced Version
+Telegram Audio Editing Bot - Enhanced Version 6.3
 - Auto/Manual mode toggle
 - Owner-only /restart and /stats
 - Extended speed (0.25x-4x) and volume (25%-600%)
 - Fixed NoneType replace error
 - Settings values visible in buttons
+- Upload mode: voice, music, audio, document
+- Filename prefix/suffix & custom rename
+- Caption header/footer & custom caption
+- Watermark: start, end, overlay, full overlay, random overlay
+- All features integrated into Auto Settings
 """
 
 import os
@@ -18,6 +23,7 @@ import shutil
 import subprocess
 import re
 import time
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import json
@@ -71,7 +77,7 @@ app = Client(
     bot_token=BOT_TOKEN,
     api_id=API_ID,
     api_hash=API_HASH,
-    workers=10  # Increase concurrent downloads
+    workers=10
 )
 
 # MongoDB connection
@@ -82,7 +88,7 @@ settings_collection = db.settings
 watermarks_collection = db.watermarks
 text_replacements_collection = db.text_replacements
 
-# Bot start time for /stats
+# Bot start time
 BOT_START_TIME = time.time()
 
 # ==================== FFMPEG HELPER FUNCTIONS ====================
@@ -190,7 +196,6 @@ def change_speed(input_path: str, output_path: str, speed: float):
     
     temp_output = tempfile.mktemp(suffix=".mp3")
     
-    # Build atempo filter chain
     filters = []
     remaining = speed
     while remaining > 2.0:
@@ -290,8 +295,11 @@ def merge_audios(input_paths: List[str], output_path: str):
         if path != input_paths[0] and os.path.exists(path):
             os.remove(path)
 
-def apply_watermark(main_audio: str, watermark_audio: str, output_path: str, position: str = "start"):
-    """Apply watermark audio to main audio"""
+def apply_watermark(main_audio: str, watermark_audio: str, output_path: str, position: str = "start", volume_factor: float = 0.2):
+    """
+    Apply watermark audio to main audio.
+    position: start, end, overlay, full_overlay, random_overlay
+    """
     temp_output = tempfile.mktemp(suffix=".mp3")
     
     if position == "start":
@@ -320,11 +328,39 @@ def apply_watermark(main_audio: str, watermark_audio: str, output_path: str, pos
         subprocess.run(cmd, check=True, capture_output=True)
         os.remove(concat_file)
         
-    else:
+    elif position == "overlay":
         cmd = [
             'ffmpeg', '-i', main_audio,
             '-i', watermark_audio,
             '-filter_complex', '[0:a][1:a]amix=inputs=2:duration=longest',
+            '-y', temp_output
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+    
+    elif position == "full_overlay":
+        # Reduce watermark volume and mix throughout
+        cmd = [
+            'ffmpeg', '-i', main_audio,
+            '-i', watermark_audio,
+            '-filter_complex', f'[1:a]volume={volume_factor}[w];[0:a][w]amix=inputs=2:duration=longest',
+            '-y', temp_output
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+    
+    elif position == "random_overlay":
+        # Get duration of main audio and watermark
+        main_info = get_audio_info(main_audio)
+        wm_info = get_audio_info(watermark_audio)
+        if main_info['duration'] > wm_info['duration']:
+            max_start = main_info['duration'] - wm_info['duration']
+            start_time = random.uniform(0, max_start)
+        else:
+            start_time = 0
+        # Insert watermark at random position
+        cmd = [
+            'ffmpeg', '-i', main_audio,
+            '-i', watermark_audio,
+            '-filter_complex', f'[0:a]adelay={int(start_time*1000)}|{int(start_time*1000)}[delayed];[1:a][delayed]amix=inputs=2:duration=longest',
             '-y', temp_output
         ]
         subprocess.run(cmd, check=True, capture_output=True)
@@ -366,6 +402,15 @@ async def get_user_settings(user_id: int) -> dict:
             "auto_speed": None,
             "auto_normalize": False,
             "auto_bass_boost": False,
+            # New fields for v6.3
+            "upload_mode": "audio",  # audio, voice, music, document
+            "filename_prefix": "",
+            "filename_suffix": "",
+            "caption_header": "",
+            "caption_footer": "",
+            "custom_filename": "",   # if non-empty, overrides prefix/suffix
+            "custom_caption": "",    # if non-empty, overrides generated caption
+            "watermark_full_volume": 0.2,  # for full_overlay volume factor
             "created_at": datetime.utcnow()
         }
         await settings_collection.insert_one(settings)
@@ -609,21 +654,8 @@ async def apply_auto_edits(audio_path: str, settings: dict, user_id: int) -> tup
             os.remove(current_path)
         current_path = output_path
     
-    # Apply watermark if enabled
-    if settings.get('watermark_enabled'):
-        watermark = await get_user_watermark(user_id)
-        if watermark and os.path.exists(watermark.get("file_path", "")):
-            output_path = tempfile.mktemp(suffix="_watermarked.mp3")
-            apply_watermark(
-                current_path,
-                watermark["file_path"],
-                output_path,
-                settings.get('watermark_position', 'start')
-            )
-            changes.append(f"🎙️ Watermark added ({settings.get('watermark_position', 'start').upper()})")
-            if current_path != audio_path:
-                os.remove(current_path)
-            current_path = output_path
+    # Apply watermark if enabled (will be applied later in export to allow position changes)
+    # But we keep it here for auto mode compatibility
     
     return current_path, changes
 
@@ -671,8 +703,31 @@ async def add_metadata_to_audio(audio_path: str, metadata: dict, thumbnail_path:
 
 # ==================== KEYBOARD MENUS ====================
 
+def get_main_menu1(settings: dict):
+    """Main menu for start"""
+    mode = settings.get('mode', 'manual').upper()
+    upload_mode = settings.get('upload_mode', 'audio').upper()
+    buttons = [
+        [
+            InlineKeyboardButton(f'🤖 Mode: {mode}', callback_data='toggle_mode'),
+            InlineKeyboardButton(f'📤 Upload: {upload_mode}', callback_data='set_upload_mode')
+        ],
+        [
+            InlineKeyboardButton('❓ Help', callback_data='help'),
+            InlineKeyboardButton('📊 Plans', callback_data='plan')
+        ],
+        [
+            InlineKeyboardButton('⚙️ All Settings', callback_data='settings'),
+            InlineKeyboardButton('🗑 Reset', callback_data='reset'),
+        ],
+        [
+            InlineKeyboardButton('❌ Close', callback_data='close')
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
 def get_main_menu():
-    """Main menu"""
+    """Main editing menu"""
     buttons = [
         [
             InlineKeyboardButton('✂️ Trim', callback_data='trim'),
@@ -691,30 +746,43 @@ def get_main_menu():
         ],
         [
             InlineKeyboardButton('📝 Text Replace', callback_data='text_replace'),
-            InlineKeyboardButton('✅ Export', callback_data='export'),
-            InlineKeyboardButton('ℹ️ Info', callback_data='info')
+            InlineKeyboardButton('✏️ Rename', callback_data='rename_file'),
+            InlineKeyboardButton('💬 Custom Caption', callback_data='custom_caption')
         ],
         [
-            InlineKeyboardButton('⚙️ Settings', callback_data='settings'),
-            InlineKeyboardButton('🗑 Reset', callback_data='reset'),
+            InlineKeyboardButton('✅ Export', callback_data='export'),
+            InlineKeyboardButton('ℹ️ Info', callback_data='info'),
+            InlineKeyboardButton('🗑 Reset', callback_data='reset')
+        ],
+        [
+            InlineKeyboardButton('⚙️ Auto Settings', callback_data='settings'),
             InlineKeyboardButton('❌ Close', callback_data='close')
         ]
     ]
     return InlineKeyboardMarkup(buttons)
 
 def get_settings_menu(settings: dict):
-    """Settings menu with current values displayed"""
+    """Full settings menu with current values displayed"""
     mode = settings.get('mode', 'manual').upper()
+    upload_mode = settings.get('upload_mode', 'audio').upper()
     auto_trim = f"{settings.get('auto_trim_start', '?')}-{settings.get('auto_trim_end', '?')}s" if settings.get('auto_trim_start') else "OFF"
     auto_vol = f"{int(settings.get('auto_volume', 1.0)*100)}%" if settings.get('auto_volume') else "OFF"
     auto_speed = f"{settings.get('auto_speed', '?')}x" if settings.get('auto_speed') else "OFF"
     auto_norm = "✅" if settings.get('auto_normalize') else "❌"
     auto_bass = "✅" if settings.get('auto_bass_boost') else "❌"
     watermark = "✅" if settings.get('watermark_enabled') else "❌"
+    wm_pos = settings.get('watermark_position', 'start').upper()
+    prefix = settings.get('filename_prefix', '') or '—'
+    suffix = settings.get('filename_suffix', '') or '—'
+    custom_fn = settings.get('custom_filename', '') or '—'
+    header = (settings.get('caption_header', '')[:20] + '...') if len(settings.get('caption_header', '')) > 20 else settings.get('caption_header', '—')
+    footer = (settings.get('caption_footer', '')[:20] + '...') if len(settings.get('caption_footer', '')) > 20 else settings.get('caption_footer', '—')
+    custom_cap = (settings.get('custom_caption', '')[:20] + '...') if len(settings.get('custom_caption', '')) > 20 else settings.get('custom_caption', '—')
     
     buttons = [
         [
-            InlineKeyboardButton(f'🤖 Mode: {mode}', callback_data='toggle_mode')
+            InlineKeyboardButton(f'🤖 Mode: {mode}', callback_data='toggle_mode'),
+            InlineKeyboardButton(f'📤 Upload: {upload_mode}', callback_data='set_upload_mode')
         ],
         [
             InlineKeyboardButton(f'✂️ Auto Trim: {auto_trim}', callback_data='set_auto_trim'),
@@ -729,8 +797,40 @@ def get_settings_menu(settings: dict):
             InlineKeyboardButton(f'🎙️ Watermark: {watermark}', callback_data='watermark_settings')
         ],
         [
+            InlineKeyboardButton(f'📍 Wm Pos: {wm_pos}', callback_data='watermark_position'),
+            InlineKeyboardButton(f'🔊 Wm Volume: {int(settings.get("watermark_full_volume",0.2)*100)}%', callback_data='set_wm_volume')
+        ],
+        [
+            InlineKeyboardButton(f'📛 Prefix: {prefix}', callback_data='set_prefix'),
+            InlineKeyboardButton(f'📛 Suffix: {suffix}', callback_data='set_suffix')
+        ],
+        [
+            InlineKeyboardButton(f'✏️ Custom Name: {custom_fn}', callback_data='set_custom_filename'),
+            InlineKeyboardButton(f'💬 Custom Cap: {custom_cap}', callback_data='set_custom_caption')
+        ],
+        [
+            InlineKeyboardButton(f'📝 Cap Header: {header}', callback_data='set_caption_header'),
+            InlineKeyboardButton(f'📝 Cap Footer: {footer}', callback_data='set_caption_footer')
+        ],
+        [
             InlineKeyboardButton('🔙 Back', callback_data='back'),
             InlineKeyboardButton('❌ Close', callback_data='close')
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+def get_upload_mode_menu():
+    buttons = [
+        [
+            InlineKeyboardButton('🎵 Audio', callback_data='upload_mode_audio'),
+            InlineKeyboardButton('🎤 Voice', callback_data='upload_mode_voice')
+        ],
+        [
+            InlineKeyboardButton('🎶 Music', callback_data='upload_mode_music'),
+            InlineKeyboardButton('📄 Document', callback_data='upload_mode_document')
+        ],
+        [
+            InlineKeyboardButton('🔙 Back', callback_data='settings')
         ]
     ]
     return InlineKeyboardMarkup(buttons)
@@ -759,14 +859,18 @@ def get_text_replace_menu(replacements: List[dict]):
     return InlineKeyboardMarkup(buttons)
 
 def get_watermark_menu(settings: dict, watermark_exists: bool):
-    """Watermark menu"""
+    """Watermark menu with extra options"""
     status = "✅ Enabled" if settings.get('watermark_enabled') else "❌ Disabled"
     position = settings.get('watermark_position', 'start').upper()
+    volume = int(settings.get('watermark_full_volume', 0.2)*100)
     
     buttons = [
         [
             InlineKeyboardButton(f'🎙️ Status: {status}', callback_data='watermark_status'),
             InlineKeyboardButton(f'📍 Position: {position}', callback_data='watermark_position')
+        ],
+        [
+            InlineKeyboardButton(f'🔊 Full Overlay Vol: {volume}%', callback_data='set_wm_volume')
         ],
         [
             InlineKeyboardButton('📤 Upload Watermark', callback_data='watermark_upload'),
@@ -782,7 +886,6 @@ def get_watermark_menu(settings: dict, watermark_exists: bool):
     return InlineKeyboardMarkup(buttons)
 
 def get_volume_menu():
-    """Volume menu with expanded range 25%-600%"""
     buttons = [
         [
             InlineKeyboardButton('25%', callback_data='vol_0.25'),
@@ -808,7 +911,6 @@ def get_volume_menu():
     return InlineKeyboardMarkup(buttons)
 
 def get_speed_menu():
-    """Speed menu with expanded range 0.25x-4x"""
     buttons = [
         [
             InlineKeyboardButton('0.25x', callback_data='speed_0.25'),
@@ -919,26 +1021,85 @@ def get_merge_menu():
 
 # ==================== EXPORT FUNCTION ====================
 
+def build_filename(session: dict, settings: dict, replacements: List[dict], extension: str) -> str:
+    """Build filename according to settings: custom > prefix+title+suffix"""
+    if settings.get('custom_filename'):
+        base = settings['custom_filename']
+        # Apply text replacements to custom name as well
+        base = apply_text_replacements(base, replacements)
+        # Ensure extension
+        if not base.endswith(f".{extension}"):
+            base = f"{base}.{extension}"
+        return base
+    
+    original = session.get("original_filename", "Audio")
+    title = session.get("metadata", {}).get("title", original)
+    title = apply_text_replacements(title, replacements)
+    # Remove extension from title if present
+    title = re.sub(r'\.[^.]*$', '', title)
+    prefix = settings.get('filename_prefix', '')
+    suffix = settings.get('filename_suffix', '')
+    filename = f"{prefix}{title}{suffix}.{extension}"
+    # Clean illegal characters
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    return filename
+
+def build_caption(settings: dict, session: dict, changes_applied: List[str], replacements: List[dict]) -> str:
+    """Build caption with header/footer or custom caption"""
+    if settings.get('custom_caption'):
+        caption = settings['custom_caption']
+        caption = apply_text_replacements(caption, replacements)
+        return caption
+    
+    header = settings.get('caption_header', '')
+    footer = settings.get('caption_footer', '')
+    caption_body = "✅ **Export complete!**\n\n"
+    if session.get("edits"):
+        caption_body += f"📝 Edits applied: {len(session['edits'])}\n"
+    if changes_applied:
+        caption_body += "✨ **Auto changes:**\n"
+        for change in changes_applied:
+            caption_body += f"• {change}\n"
+    if settings.get('watermark_enabled'):
+        caption_body += f"🎙️ Watermark: {settings.get('watermark_position', 'start').upper()}\n"
+    if replacements:
+        active_count = len([r for r in replacements if r.get('enabled', True)])
+        caption_body += f"📝 Text replacements: {active_count} active\n"
+    caption_body += "\nThank you for using Audio Studio Bot! 🎵"
+    
+    full_caption = ""
+    if header:
+        full_caption += f"{header}\n\n"
+    full_caption += caption_body
+    if footer:
+        full_caption += f"\n\n{footer}"
+    return full_caption
+
 async def process_and_export(user_id: int, session: dict, status_msg: Message, original_message: Message = None):
     """Central export processing function"""
     try:
+        # Apply manual edits
         processed_path = await apply_all_edits(session["current_file"], session.get("edits", []))
         
         settings = await get_user_settings(user_id)
         watermark = await get_user_watermark(user_id)
+        replacements = await get_text_replacements(user_id)
+        changes_applied = []
         
+        # Apply auto edits (including watermark if enabled)
         if settings.get('watermark_enabled') and watermark:
-            watermarked_path = tempfile.mktemp(suffix="_watermarked.mp3")
-            apply_watermark(
-                processed_path,
-                watermark["file_path"],
-                watermarked_path,
-                settings.get('watermark_position', 'start')
-            )
-            if os.path.exists(processed_path):
-                os.remove(processed_path)
-            processed_path = watermarked_path
+            # Determine watermark position and apply
+            wm_position = settings.get('watermark_position', 'start')
+            if wm_position in ['full_overlay', 'random_overlay']:
+                volume = settings.get('watermark_full_volume', 0.2)
+                apply_watermark(processed_path, watermark["file_path"], processed_path, wm_position, volume)
+                changes_applied.append(f"🎙️ Watermark added ({wm_position.upper()})")
+            else:
+                # start, end, overlay - handled by same function without volume param
+                apply_watermark(processed_path, watermark["file_path"], processed_path, wm_position)
+                changes_applied.append(f"🎙️ Watermark added ({wm_position.upper()})")
         
+        # Apply metadata and thumbnail
         if session.get("metadata"):
             processed_path = await add_metadata_to_audio(
                 processed_path,
@@ -946,27 +1107,46 @@ async def process_and_export(user_id: int, session: dict, status_msg: Message, o
                 session.get("thumbnail_path")
             )
         
-        replacements = await get_text_replacements(user_id)
-        original_filename = session.get("original_filename", "Edited Audio")
-        title = session.get("metadata", {}).get("title", original_filename)
-        title = apply_text_replacements(title, replacements)
+        # Build filename
+        extension = session.get('output_format', 'mp3')
+        filename = build_filename(session, settings, replacements, extension)
         
-        caption = "✅ **Export complete!**\n\n"
-        if session.get("edits"):
-            caption += f"📝 Edits applied: {len(session['edits'])}\n"
-        if settings.get('watermark_enabled'):
-            caption += f"🎙️ Watermark: {settings.get('watermark_position', 'start').upper()}\n"
-        if replacements:
-            active_count = len([r for r in replacements if r.get('enabled', True)])
-            caption += f"📝 Text replacements: {active_count} active\n"
-        caption += "\nThank you for using Audio Studio Bot! 🎵"
+        # Build caption
+        caption = build_caption(settings, session, changes_applied, replacements)
         
-        await status_msg.reply_audio(
-            audio=processed_path,
-            title=title,
-            performer=session.get("metadata", {}).get("artist", "Audio Editor Bot"),
-            caption=caption
-        )
+        # Send according to upload mode
+        upload_mode = settings.get('upload_mode', 'audio')
+        if upload_mode == 'voice':
+            await status_msg.reply_voice(
+                voice=processed_path,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        elif upload_mode == 'music':
+            await status_msg.reply_audio(
+                audio=processed_path,
+                title=session.get("metadata", {}).get("title", filename),
+                performer=session.get("metadata", {}).get("artist", "Audio Editor Bot"),
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                file_name=filename
+            )
+        elif upload_mode == 'document':
+            await status_msg.reply_document(
+                document=processed_path,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                file_name=filename
+            )
+        else:  # audio
+            await status_msg.reply_audio(
+                audio=processed_path,
+                title=session.get("metadata", {}).get("title", filename),
+                performer=session.get("metadata", {}).get("artist", "Audio Editor Bot"),
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                file_name=filename
+            )
         
         await status_msg.delete()
         
@@ -983,8 +1163,10 @@ async def process_and_export(user_id: int, session: dict, status_msg: Message, o
 
 @app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    settings = await get_user_settings(user_id)
     welcome_text = """
-🎵 **Welcome to Audio Studio Bot!** 🎵
+🎵 **Welcome to Audio Studio Bot v6.3!** 🎵
 
 I'm your professional audio editing assistant.
 
@@ -993,21 +1175,23 @@ I'm your professional audio editing assistant.
 🔄 Format Conversion | 🎨 Audio Enhancements
 🔀 Merge Audios | 🎙️ Watermark Audio
 📝 Metadata & Thumbnails | 📝 Text Replacement
+✏️ Rename File | 💬 Custom Caption
+📤 Upload Mode: Audio/Voice/Music/Document
 
 **Modes:**
-🤖 **Auto Mode**: Automatically applies your saved settings and exports immediately.
+🤖 **Auto Mode**: Applies your saved settings and exports instantly.
 👤 **Manual Mode**: Choose edits step by step with full control.
 
 **Commands:**
 /start - Start bot
-/settings - Configure auto-apply settings and toggle mode
+/settings - Configure all settings
 /merge - Quick merge access
 /watermark - Watermark settings
 /reset - Reset session
 
 Send an audio file to get started! 🚀
     """
-    await message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu())
+    await message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu1(settings))
 
 @app.on_message(filters.command("settings"))
 async def settings_command(client: Client, message: Message):
@@ -1023,12 +1207,18 @@ async def settings_command(client: Client, message: Message):
 ⚙️ **Your Settings**
 
 🤖 Mode: `{mode_text}`
+📤 Upload Mode: `{settings.get('upload_mode', 'audio').upper()}`
 ✂️ Auto Trim: `{auto_trim}`
 🔊 Auto Volume: `{auto_vol}`
 ⚡ Auto Speed: `{auto_speed}`
 ✨ Auto Normalize: `{'ON' if settings.get('auto_normalize') else 'OFF'}`
 🎸 Auto Bass Boost: `{'ON' if settings.get('auto_bass_boost') else 'OFF'}`
 🎙️ Watermark: `{'ON' if settings.get('watermark_enabled') else 'OFF'}`
+📍 Watermark Position: `{settings.get('watermark_position', 'start').upper()}`
+📛 Filename Prefix: `{settings.get('filename_prefix', '') or '—'}`
+📛 Filename Suffix: `{settings.get('filename_suffix', '') or '—'}`
+✏️ Custom Filename: `{settings.get('custom_filename', '') or '—'}`
+💬 Custom Caption: `{settings.get('custom_caption', '') or '—'}`
 
 Use buttons below to modify settings
     """
@@ -1069,27 +1259,22 @@ async def watermark_command(client: Client, message: Message):
         "Upload an audio clip of your name or channel intro.\n"
         "It will be automatically applied to all your exports.\n\n"
         f"Status: {'Enabled' if settings.get('watermark_enabled') else 'Disabled'}\n"
-        f"Position: {settings.get('watermark_position', 'start').upper()}",
+        f"Position: {settings.get('watermark_position', 'start').upper()}\n"
+        f"Full Overlay Volume: {int(settings.get('watermark_full_volume',0.2)*100)}%",
         reply_markup=get_watermark_menu(settings, watermark is not None)
     )
 
 @app.on_message(filters.command("restart") & filters.user(OWNER_ID))
 async def restart_command(client: Client, message: Message):
-    """Owner-only restart command"""
     await message.reply_text("🔄 Restarting bot...")
     os.execv(sys.executable, ['python'] + sys.argv)
 
 @app.on_message(filters.command("stats") & filters.user(OWNER_ID))
 async def stats_command(client: Client, message: Message):
-    """Owner-only stats command"""
     uptime_seconds = int(time.time() - BOT_START_TIME)
     uptime_str = str(timedelta(seconds=uptime_seconds))
-    
-    # Count total users (approximate)
     user_count = await settings_collection.count_documents({})
     session_count = await sessions_collection.count_documents({})
-    
-    # Disk usage
     total_size = 0
     for directory in [DOWNLOAD_DIR, CACHE_DIR, TEMP_DIR, WATERMARK_DIR]:
         for dirpath, dirnames, filenames in os.walk(directory):
@@ -1097,9 +1282,7 @@ async def stats_command(client: Client, message: Message):
                 fp = os.path.join(dirpath, f)
                 if os.path.exists(fp):
                     total_size += os.path.getsize(fp)
-    
     size_mb = total_size / (1024 * 1024)
-    
     stats_text = f"""
 📊 **Bot Statistics**
 
@@ -1143,23 +1326,19 @@ async def handle_audio(client: Client, message: Message):
         # Check for merge queue
         if session.get("awaiting_merge"):
             file_name = audio.file_name or f"audio_{len(session.get('merge_queue', [])) + 1}"
-            
             if "merge_queue" not in session:
                 session["merge_queue"] = []
-            
             session["merge_queue"].append({
                 "file_id": file_id,
                 "name": file_name,
                 "path": audio_path
             })
             await update_user_session(user_id, session)
-            
             response = await client.ask(
                 chat_id=message.chat.id,
                 text=f"✅ Added: {file_name}\n\nQueue size: {len(session['merge_queue'])}/10\n\nAdd more? (yes/no)",
                 timeout=30
             )
-            
             if response.text.lower() in ['yes', 'y', 'add', 'more']:
                 session["awaiting_merge"] = True
                 await update_user_session(user_id, session)
@@ -1175,12 +1354,9 @@ async def handle_audio(client: Client, message: Message):
             file_name = audio.file_name or "watermark_audio"
             watermark_path = os.path.join(WATERMARK_DIR, f"watermark_{user_id}.mp3")
             shutil.copy(audio_path, watermark_path)
-            
             await save_user_watermark(user_id, watermark_path, file_name, audio_info['duration'])
-            
             session["awaiting_watermark"] = False
             await update_user_session(user_id, session)
-            
             await processing_msg.edit_text(
                 f"✅ **Watermark audio saved!**\n\n"
                 f"📝 Name: {file_name}\n"
@@ -1194,10 +1370,10 @@ async def handle_audio(client: Client, message: Message):
         current_path = audio_path
         changes_applied = []
         
-        # Apply auto edits if any are configured (regardless of mode)
+        # Apply auto edits if any are configured
         if (settings.get('auto_trim_start') or settings.get('auto_volume') or 
             settings.get('auto_speed') or settings.get('auto_normalize') or 
-            settings.get('auto_bass_boost') or settings.get('watermark_enabled')):
+            settings.get('auto_bass_boost')):
             current_path, changes_applied = await apply_auto_edits(audio_path, settings, user_id)
         
         session["current_file"] = current_path
@@ -1222,14 +1398,11 @@ async def handle_audio(client: Client, message: Message):
         
         # Check mode
         if settings.get('mode') == 'auto':
-            # AUTO MODE: Export immediately
             info_text += f"\n\n🤖 **Auto Mode active - Exporting now...**"
             await processing_msg.edit_text(info_text, parse_mode=ParseMode.MARKDOWN)
-            
-            # Process and export
+            # Apply watermark if enabled (auto mode includes watermark)
             await process_and_export(user_id, session, processing_msg, message)
         else:
-            # MANUAL MODE: Show editing menu
             info_text += f"\n\n👤 **Manual Mode** - Choose an editing option below:"
             await processing_msg.edit_text(info_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu())
         
@@ -1249,12 +1422,10 @@ async def handle_thumbnail(client: Client, message: Message):
             photo = message.photo
             thumb_path = os.path.join(DOWNLOAD_DIR, f"thumb_{user_id}.jpg")
             await app.download_media(photo, file_name=thumb_path)
-            
             session["thumbnail_path"] = thumb_path
             session["thumbnail_file_id"] = photo.file_id
             session["awaiting_thumbnail"] = False
             await update_user_session(user_id, session)
-            
             await message.reply_text("✅ Thumbnail added!", reply_markup=get_metadata_menu())
         except Exception as e:
             logger.error(f"Thumbnail error: {e}")
@@ -1279,6 +1450,66 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
     
+    # ==================== HELP & PLANS ====================
+    
+    if data == "help":
+        help_text = """
+❓ **Help & Commands**
+
+**Basic Commands:**
+/start - Start bot
+/settings - Configure all settings
+/merge - Merge audio files
+/watermark - Watermark settings
+/reset - Reset current session
+
+**Editing Features:**
+✂️ Trim - Cut a portion
+🔊 Volume - Adjust from 25% to 600%
+⚡ Speed - Change from 0.25x to 4.0x
+🔄 Convert - Change format (MP3, WAV, FLAC, OGG, M4A)
+🎨 Enhance - Normalize, Bass Boost, Compress
+🔀 Merge - Combine multiple audios
+🎙️ Watermark - Add intro/outro or overlay
+📝 Metadata - Edit title, artist, album, thumbnail
+📝 Text Replace - Auto-rename words
+✏️ Rename - Custom filename
+💬 Custom Caption - Override default caption
+
+**Upload Modes:** Audio, Voice, Music, Document
+
+**Auto Mode:** All settings applied instantly on upload.
+
+Contact @dev for support.
+        """
+        await message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        await callback_query.answer()
+        return
+    
+    if data == "plan":
+        plan_text = """
+📊 **Plans & Features**
+
+🎵 **Free Plan (Current)**
+- All editing features
+- Unlimited exports
+- Watermark support
+- Text replacements
+- Up to 10 files merge
+
+✨ **Premium Plan (Coming Soon)**
+- Higher file size limit
+- Priority processing
+- Cloud storage
+- Batch processing
+- Custom presets
+
+Stay tuned for updates!
+        """
+        await message.reply_text(plan_text, parse_mode=ParseMode.MARKDOWN)
+        await callback_query.answer()
+        return
+    
     # ==================== MODE TOGGLE ====================
     
     if data == "toggle_mode":
@@ -1291,6 +1522,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer(f"Mode switched to {new_mode.upper()}", show_alert=True)
         return
     
+    # ==================== UPLOAD MODE ====================
+    
+    if data == "set_upload_mode":
+        await message.edit_reply_markup(reply_markup=get_upload_mode_menu())
+        await callback_query.answer()
+        return
+    
+    if data.startswith("upload_mode_"):
+        mode = data.split("_")[2]
+        await update_user_settings(user_id, {"upload_mode": mode})
+        settings = await get_user_settings(user_id)
+        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
+        await callback_query.answer(f"Upload mode set to {mode.upper()}", show_alert=True)
+        return
+    
     # ==================== TEXT REPLACEMENT HANDLERS ====================
     
     if data == "text_replace":
@@ -1301,29 +1547,22 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
     
     if data == "text_add":
         await callback_query.answer()
-        
         response1 = await client.ask(
             chat_id=message.chat.id,
             text="📝 **Step 1/2**\n\nSend the word/phrase you want to REMOVE or REPLACE:\n\nExample: `badword`\n\nSend `cancel` to cancel.",
             timeout=60
         )
-        
         if response1.text.lower() == 'cancel':
             await response1.reply_text("❌ Cancelled.", reply_markup=get_main_menu())
             return
-        
         find_text = response1.text
-        
         response2 = await client.ask(
             chat_id=message.chat.id,
             text=f"📝 **Step 2/2**\n\nWord/phrase to remove: `{find_text}`\n\nSend the word/phrase to REPLACE it with:\n\nExample: `goodword`\nOr send `(empty)` to just remove it.",
             timeout=60
         )
-        
         replace_text = "" if response2.text.lower() == '(empty)' else response2.text
-        
         await add_text_replacement(user_id, find_text, replace_text)
-        
         replacements = await get_text_replacements(user_id)
         await response2.reply_text(
             f"✅ Replacement added!\n\n`{find_text}` → `{replace_text if replace_text else '(removed)'}`",
@@ -1336,7 +1575,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         if not replacements:
             await callback_query.answer("No replacements to remove!", show_alert=True)
             return
-        
         buttons = []
         for r in replacements:
             buttons.append([
@@ -1344,7 +1582,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                                    callback_data=f"text_del_{r['id']}")
             ])
         buttons.append([InlineKeyboardButton('🔙 Back', callback_data='text_replace')])
-        
         await message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
         await callback_query.answer()
         return
@@ -1379,112 +1616,148 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
     
-    # ==================== SETTINGS HANDLERS ====================
+    # ==================== FILENAME PREFIX/SUFFIX & RENAME ====================
     
-    if data == "settings":
-        settings = await get_user_settings(user_id)
-        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
+    if data == "set_prefix":
         await callback_query.answer()
-        return
-    
-    if data == "set_auto_trim":
-        await callback_query.answer()
-        
         response = await client.ask(
             chat_id=message.chat.id,
-            text="✂️ **Set Auto Trim**\n\nSend start and end time in seconds.\nFormat: `start end`\nExample: `30 120`\n\nSend `off` to disable auto trim.",
+            text="📛 **Set Filename Prefix**\n\nSend the prefix to add before filename.\nExample: `my_`\n\nSend `clear` to remove.",
             timeout=60
         )
-        
-        if response.text.lower() == 'off':
-            await update_user_settings(user_id, {"auto_trim_start": None, "auto_trim_end": None})
-            await response.reply_text("✅ Auto trim disabled.")
+        if response.text.lower() == 'clear':
+            await update_user_settings(user_id, {"filename_prefix": ""})
+            await response.reply_text("✅ Prefix cleared.")
         else:
-            try:
-                parts = response.text.split()
-                start = float(parts[0])
-                end = float(parts[1])
-                await update_user_settings(user_id, {"auto_trim_start": start, "auto_trim_end": end})
-                await response.reply_text(f"✅ Auto trim set: {start}s to {end}s")
-            except:
-                await response.reply_text("❌ Invalid format! Use: `start end`")
-        
+            await update_user_settings(user_id, {"filename_prefix": response.text})
+            await response.reply_text(f"✅ Prefix set to: `{response.text}`")
         settings = await get_user_settings(user_id)
         await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
         return
     
-    if data == "set_auto_volume":
+    if data == "set_suffix":
         await callback_query.answer()
-        
         response = await client.ask(
             chat_id=message.chat.id,
-            text="🔊 **Set Auto Volume**\n\nSend volume percentage (25-600).\nExample: `150` for 150%\n\nSend `off` to disable.",
+            text="📛 **Set Filename Suffix**\n\nSend the suffix to add after filename (before extension).\nExample: `_final`\n\nSend `clear` to remove.",
             timeout=60
         )
-        
-        if response.text.lower() == 'off':
-            await update_user_settings(user_id, {"auto_volume": None})
-            await response.reply_text("✅ Auto volume disabled.")
+        if response.text.lower() == 'clear':
+            await update_user_settings(user_id, {"filename_suffix": ""})
+            await response.reply_text("✅ Suffix cleared.")
         else:
-            try:
-                percent = float(response.text)
-                volume = percent / 100
-                if 0.25 <= volume <= 6.0:
-                    await update_user_settings(user_id, {"auto_volume": volume})
-                    await response.reply_text(f"✅ Auto volume set to {int(percent)}%")
-                else:
-                    await response.reply_text("❌ Volume must be between 25% and 600%")
-            except:
-                await response.reply_text("❌ Invalid number!")
-        
+            await update_user_settings(user_id, {"filename_suffix": response.text})
+            await response.reply_text(f"✅ Suffix set to: `{response.text}`")
         settings = await get_user_settings(user_id)
         await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
         return
     
-    if data == "set_auto_speed":
+    if data == "set_custom_filename":
         await callback_query.answer()
-        
         response = await client.ask(
             chat_id=message.chat.id,
-            text="⚡ **Set Auto Speed**\n\nSend speed (0.25 to 4.0).\nExamples: `0.5`, `1.5`, `2.0`\n\nSend `off` to disable.",
+            text="✏️ **Set Custom Filename**\n\nSend the full filename (without extension) to use for all exports.\nExample: `My Awesome Audio`\n\nSend `clear` to use prefix/suffix instead.",
             timeout=60
         )
-        
-        if response.text.lower() == 'off':
-            await update_user_settings(user_id, {"auto_speed": None})
-            await response.reply_text("✅ Auto speed disabled.")
+        if response.text.lower() == 'clear':
+            await update_user_settings(user_id, {"custom_filename": ""})
+            await response.reply_text("✅ Custom filename cleared. Will use prefix/suffix.")
         else:
-            try:
-                speed = float(response.text)
-                if 0.25 <= speed <= 4.0:
-                    await update_user_settings(user_id, {"auto_speed": speed})
-                    await response.reply_text(f"✅ Auto speed set to {speed}x")
-                else:
-                    await response.reply_text("❌ Speed must be between 0.25 and 4.0")
-            except:
-                await response.reply_text("❌ Invalid number!")
-        
+            await update_user_settings(user_id, {"custom_filename": response.text})
+            await response.reply_text(f"✅ Custom filename set to: `{response.text}`")
         settings = await get_user_settings(user_id)
         await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
         return
     
-    if data == "toggle_auto_normalize":
-        settings = await get_user_settings(user_id)
-        new_value = not settings.get('auto_normalize', False)
-        await update_user_settings(user_id, {"auto_normalize": new_value})
-        settings = await get_user_settings(user_id)
-        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
-        await callback_query.answer(f"Auto normalize {'enabled' if new_value else 'disabled'}")
+    if data == "rename_file":
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="✏️ **Rename Current Audio**\n\nSend a new name for this audio (without extension).\nThis will override prefix/suffix for this session only.\n\nSend `clear` to reset.",
+            timeout=60
+        )
+        if response.text.lower() == 'clear':
+            # Clear session custom name (not stored in settings)
+            if "custom_session_name" in session:
+                del session["custom_session_name"]
+                await update_user_session(user_id, session)
+            await response.reply_text("✅ Session name reset.")
+        else:
+            session["custom_session_name"] = response.text
+            await update_user_session(user_id, session)
+            await response.reply_text(f"✅ Session renamed to: `{response.text}`")
         return
     
-    if data == "toggle_auto_bass":
-        settings = await get_user_settings(user_id)
-        new_value = not settings.get('auto_bass_boost', False)
-        await update_user_settings(user_id, {"auto_bass_boost": new_value})
+    # ==================== CUSTOM CAPTION HEADER/FOOTER ====================
+    
+    if data == "set_caption_header":
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="📝 **Set Caption Header**\n\nSend text to appear at the beginning of every caption.\nExample: `✨ My Awesome Channel ✨`\n\nSend `clear` to remove.",
+            timeout=60
+        )
+        if response.text.lower() == 'clear':
+            await update_user_settings(user_id, {"caption_header": ""})
+            await response.reply_text("✅ Caption header cleared.")
+        else:
+            await update_user_settings(user_id, {"caption_header": response.text})
+            await response.reply_text(f"✅ Caption header set.")
         settings = await get_user_settings(user_id)
         await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
-        await callback_query.answer(f"Auto bass boost {'enabled' if new_value else 'disabled'}")
         return
+    
+    if data == "set_caption_footer":
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="📝 **Set Caption Footer**\n\nSend text to appear at the end of every caption.\nExample: `Powered by @YourBot`\n\nSend `clear` to remove.",
+            timeout=60
+        )
+        if response.text.lower() == 'clear':
+            await update_user_settings(user_id, {"caption_footer": ""})
+            await response.reply_text("✅ Caption footer cleared.")
+        else:
+            await update_user_settings(user_id, {"caption_footer": response.text})
+            await response.reply_text(f"✅ Caption footer set.")
+        settings = await get_user_settings(user_id)
+        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
+        return
+    
+    if data == "set_custom_caption":
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="💬 **Set Custom Caption**\n\nSend the full caption to be used for all exports (overrides header/footer).\nYou can use markdown.\n\nSend `clear` to use default header/footer.",
+            timeout=120
+        )
+        if response.text.lower() == 'clear':
+            await update_user_settings(user_id, {"custom_caption": ""})
+            await response.reply_text("✅ Custom caption cleared. Will use header/footer.")
+        else:
+            await update_user_settings(user_id, {"custom_caption": response.text})
+            await response.reply_text(f"✅ Custom caption set.")
+        settings = await get_user_settings(user_id)
+        await message.edit_reply_markup(reply_markup=get_settings_menu(settings))
+        return
+    
+    if data == "custom_caption":
+        # Shortcut from main menu to set custom caption
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="💬 **Custom Caption for this session only?**\n\nSend the caption you want for this export only (overrides settings).\nSend `skip` to use your saved settings.",
+            timeout=60
+        )
+        if response.text.lower() != 'skip':
+            session["session_caption"] = response.text
+            await update_user_session(user_id, session)
+            await response.reply_text("✅ Session caption set. It will be used when you export.")
+        else:
+            await response.reply_text("OK, using saved settings.")
+        return
+    
+    # ==================== WATERMARK SETTINGS ====================
     
     if data == "watermark_settings":
         settings = await get_user_settings(user_id)
@@ -1493,7 +1766,81 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
     
-    # ==================== OTHER EDITING HANDLERS ====================
+    if data == "watermark_status":
+        settings = await get_user_settings(user_id)
+        new_status = not settings.get('watermark_enabled', False)
+        await update_user_settings(user_id, {"watermark_enabled": new_status})
+        settings = await get_user_settings(user_id)
+        watermark = await get_user_watermark(user_id)
+        await message.edit_reply_markup(reply_markup=get_watermark_menu(settings, watermark is not None))
+        await callback_query.answer(f"Watermark {'enabled' if new_status else 'disabled'}")
+        return
+    
+    if data == "watermark_position":
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="🎙️ **Watermark Position:**\n\nSend:\n- `start` - Beginning\n- `end` - End\n- `overlay` - Mixed\n- `full_overlay` - Mixed throughout (lower volume)\n- `random_overlay` - Random position once\n\nExample: `full_overlay`",
+            timeout=30
+        )
+        position = response.text.lower()
+        if position in ['start', 'end', 'overlay', 'full_overlay', 'random_overlay']:
+            await update_user_settings(user_id, {"watermark_position": position})
+            settings = await get_user_settings(user_id)
+            watermark = await get_user_watermark(user_id)
+            await response.reply_text(f"✅ Position set to: {position.upper()}", reply_markup=get_watermark_menu(settings, watermark is not None))
+        else:
+            await response.reply_text("❌ Invalid! Use one of: start, end, overlay, full_overlay, random_overlay")
+        return
+    
+    if data == "set_wm_volume":
+        await callback_query.answer()
+        response = await client.ask(
+            chat_id=message.chat.id,
+            text="🔊 **Watermark Volume for Full Overlay**\n\nSend volume percentage (5-50).\nExample: `20` for 20% volume.\nDefault is 20%.",
+            timeout=30
+        )
+        try:
+            vol = int(response.text)
+            if 5 <= vol <= 50:
+                factor = vol / 100
+                await update_user_settings(user_id, {"watermark_full_volume": factor})
+                settings = await get_user_settings(user_id)
+                watermark = await get_user_watermark(user_id)
+                await response.reply_text(f"✅ Watermark volume set to {vol}%", reply_markup=get_watermark_menu(settings, watermark is not None))
+            else:
+                await response.reply_text("❌ Volume must be between 5 and 50.")
+        except:
+            await response.reply_text("❌ Invalid number.")
+        return
+    
+    if data == "watermark_upload":
+        session["awaiting_watermark"] = True
+        await update_user_session(user_id, session)
+        await callback_query.answer()
+        await message.reply_text("🎙️ Send your watermark audio (3-5 seconds recommended):")
+        return
+    
+    if data == "watermark_preview":
+        watermark = await get_user_watermark(user_id)
+        if watermark and os.path.exists(watermark.get("file_path", "")):
+            await message.reply_audio(
+                audio=watermark["file_path"],
+                title="Watermark Preview",
+                caption="🎙️ Your saved watermark audio."
+            )
+        else:
+            await callback_query.answer("No watermark saved!", show_alert=True)
+        return
+    
+    if data == "watermark_remove":
+        await delete_user_watermark(user_id)
+        settings = await get_user_settings(user_id)
+        await message.edit_reply_markup(reply_markup=get_watermark_menu(settings, False))
+        await callback_query.answer("Watermark removed!")
+        return
+    
+    # ==================== OTHER EDITING HANDLERS (unchanged from previous) ====================
     
     elif data == "trim":
         await callback_query.answer()
@@ -1502,18 +1849,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             text="✂️ **Trim Audio**\n\nSend start and end time in seconds.\nFormat: `start end`\nExample: `30 120`",
             timeout=60
         )
-        
         try:
             parts = response.text.split()
             start = float(parts[0])
             end = float(parts[1])
-            
             edit = {"type": "trim", "start": start, "end": end}
             if "edits" not in session:
                 session["edits"] = []
             session["edits"].append(edit)
             await update_user_session(user_id, session)
-            
             await response.reply_text(f"✅ Trim added: {start}s to {end}s", reply_markup=get_main_menu())
         except:
             await response.reply_text("❌ Invalid format!", reply_markup=get_main_menu())
@@ -1591,7 +1935,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         level = data.split("_")[1]
         bitrates = {"low": "64k", "medium": "128k", "high": "192k", "max": "320k"}
         bitrate = bitrates.get(level, "128k")
-        
         edit = {"type": "compress", "bitrate": bitrate, "level": level}
         if "edits" not in session:
             session["edits"] = []
@@ -1737,27 +2080,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         else:
             await callback_query.answer("Merging...", show_alert=True)
             status_msg = await message.reply_text("🔄 **Merging audio files...**")
-            
             try:
                 merge_paths = [file['path'] for file in merge_queue]
                 output_path = tempfile.mktemp(suffix="_merged.mp3")
-                
                 merge_audios(merge_paths, output_path)
-                
                 await message.reply_audio(
                     audio=output_path,
                     title="Merged Audio",
                     performer="Audio Editor Bot",
                     caption="✅ **Merge completed!**"
                 )
-                
                 session["current_file"] = output_path
                 session["merge_queue"] = []
                 await update_user_session(user_id, session)
-                
                 await status_msg.delete()
                 await message.edit_reply_markup(reply_markup=get_main_menu())
-                
             except Exception as e:
                 await status_msg.edit_text(f"❌ Merge failed: {str(e)}")
     
@@ -1766,74 +2103,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await update_user_session(user_id, session)
         await callback_query.answer("Queue cleared!", show_alert=True)
     
-    # ==================== WATERMARK HANDLERS ====================
-    
-    elif data == "watermark":
-        settings = await get_user_settings(user_id)
-        watermark = await get_user_watermark(user_id)
-        await message.edit_reply_markup(reply_markup=get_watermark_menu(settings, watermark is not None))
-        await callback_query.answer()
-    
-    elif data == "watermark_status":
-        settings = await get_user_settings(user_id)
-        new_status = not settings.get('watermark_enabled', False)
-        await update_user_settings(user_id, {"watermark_enabled": new_status})
-        settings = await get_user_settings(user_id)
-        watermark = await get_user_watermark(user_id)
-        await message.edit_reply_markup(reply_markup=get_watermark_menu(settings, watermark is not None))
-        await callback_query.answer(f"Watermark {'enabled' if new_status else 'disabled'}")
-    
-    elif data == "watermark_position":
-        await callback_query.answer()
-        response = await client.ask(
-            chat_id=message.chat.id,
-            text="🎙️ **Watermark Position:**\n\nSend:\n- `start` - Beginning\n- `end` - End\n- `overlay` - Mixed\n\nExample: `start`",
-            timeout=30
-        )
-        position = response.text.lower()
-        if position in ['start', 'end', 'overlay']:
-            await update_user_settings(user_id, {"watermark_position": position})
-            settings = await get_user_settings(user_id)
-            watermark = await get_user_watermark(user_id)
-            await response.reply_text(f"✅ Position set to: {position.upper()}", reply_markup=get_watermark_menu(settings, watermark is not None))
-        else:
-            await response.reply_text("❌ Invalid! Use 'start', 'end', or 'overlay'")
-    
-    elif data == "watermark_upload":
-        session["awaiting_watermark"] = True
-        await update_user_session(user_id, session)
-        await callback_query.answer()
-        await message.reply_text("🎙️ Send your watermark audio (3-5 seconds recommended):")
-    
-    elif data == "watermark_preview":
-        watermark = await get_user_watermark(user_id)
-        if watermark and os.path.exists(watermark.get("file_path", "")):
-            await message.reply_audio(
-                audio=watermark["file_path"],
-                title="Watermark Preview",
-                caption="🎙️ Your saved watermark audio."
-            )
-        else:
-            await callback_query.answer("No watermark saved!", show_alert=True)
-    
-    elif data == "watermark_remove":
-        await delete_user_watermark(user_id)
-        settings = await get_user_settings(user_id)
-        await message.edit_reply_markup(reply_markup=get_watermark_menu(settings, False))
-        await callback_query.answer("Watermark removed!")
-    
     # ==================== PREVIEW & EXPORT ====================
     
     elif data == "preview":
         if not session.get("current_file"):
             await callback_query.answer("No audio loaded!", show_alert=True)
             return
-        
         await callback_query.answer("Generating preview...")
-        
         try:
             temp_preview = tempfile.mktemp(suffix="_preview.mp3")
-            
             if session.get("edits"):
                 processed_path = await apply_all_edits(session["current_file"], session["edits"])
                 generate_preview(processed_path, temp_preview, duration=15)
@@ -1841,16 +2119,13 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
                     os.remove(processed_path)
             else:
                 generate_preview(session["current_file"], temp_preview, duration=15)
-            
             await message.reply_audio(
                 audio=temp_preview,
                 title="Preview (15 seconds)",
                 caption="🎬 15-second preview"
             )
-            
             if os.path.exists(temp_preview):
                 os.remove(temp_preview)
-                
         except Exception as e:
             await callback_query.answer(f"Preview failed: {str(e)}", show_alert=True)
     
@@ -1858,7 +2133,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         if not session.get("current_file"):
             await callback_query.answer("No audio loaded!", show_alert=True)
             return
-        
         status_msg = await message.reply_text("🎨 **Processing your audio...**")
         await process_and_export(user_id, session, status_msg)
         await callback_query.answer("Export completed!")
@@ -1874,7 +2148,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
             settings = await get_user_settings(user_id)
             watermark = await get_user_watermark(user_id)
             replacements = await get_text_replacements(user_id)
-            
             info_text = f"""
 📊 **Audio Information**
 
@@ -1885,17 +2158,17 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
 📝 Text Replacements: `{len(replacements)} rules`
 🎵 Output: `{session.get('output_format', 'mp3')}`
 📦 Metadata: `{'Yes' if session.get('metadata') else 'No'}`
+📤 Upload Mode: `{settings.get('upload_mode', 'audio')}`
+📛 Custom Filename: `{settings.get('custom_filename', 'Not set')}`
             """
         else:
             info_text = "No audio loaded. Send an audio file to start!"
-        
         await message.reply_text(info_text, parse_mode=ParseMode.MARKDOWN)
         await callback_query.answer()
 
 # ==================== CLEANUP ====================
 
 async def cleanup_old_files():
-    """Periodically clean up old files"""
     while True:
         try:
             cutoff = datetime.now() - timedelta(hours=1)
@@ -1916,12 +2189,11 @@ async def cleanup_old_files():
 # ==================== BOT UTILITIES ====================
 
 def notify_owner():
-    """Notify owner that bot is live"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         data = {
             "chat_id": OWNER_ID,
-            "text": "🤖 **Audio Studio Bot v6.2 is Live!**\n\n✅ Auto/Manual Mode Toggle\n✅ Settings values visible\n✅ Speed: 0.25x-4x | Volume: 25%-600%\n✅ Owner commands: /restart, /stats\n\nSend /start to begin!",
+            "text": "🤖 **Audio Studio Bot v6.3 is Live!**\n\n✅ Auto/Manual Mode Toggle\n✅ Upload Modes: Audio/Voice/Music/Document\n✅ Filename Prefix/Suffix & Custom Rename\n✅ Caption Header/Footer & Custom Caption\n✅ Watermark: start/end/overlay/full/random\n✅ Speed: 0.25x-4x | Volume: 25%-600%\n✅ Owner commands: /restart, /stats\n\nSend /start to begin!",
             "parse_mode": "Markdown"
         }
         requests.post(url, json=data)
@@ -1929,13 +2201,12 @@ def notify_owner():
         logger.error(f"Failed to notify owner: {e}")
 
 def reset_and_set_commands():
-    """Reset and set bot commands"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
         requests.post(url, json={"commands": []})
         commands = [
             {"command": "start", "description": "🚀 Start the bot"},
-            {"command": "settings", "description": "⚙️ Settings & Mode toggle"},
+            {"command": "settings", "description": "⚙️ All Settings & Mode toggle"},
             {"command": "merge", "description": "🔀 Merge audio files"},
             {"command": "watermark", "description": "🎙️ Watermark settings"},
             {"command": "reset", "description": "♻️ Reset session"},
@@ -1951,25 +2222,23 @@ def reset_and_set_commands():
 if __name__ == "__main__":
     reset_and_set_commands()
     notify_owner()
-    
     loop = asyncio.get_event_loop()
     loop.create_task(cleanup_old_files())
-    
-    logger.info("Starting Audio Studio Bot v6.2 ...")
+    logger.info("Starting Audio Studio Bot v6.3 ...")
     app.run()
 
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                      MUSIC BOT —                                         ║
+║                      AUDIO STUDIO BOT — v6.3                             ║
 ║                                                                          ║
 ║  Telegram Audio Editing Bot - Complete Rewritten Version                 ║
-║  All features working: trim, speed, merge, insert at position            ║
+║  All features working: trim, speed, merge, watermark with options,       ║
+║  upload modes, filename prefix/suffix, custom rename, caption header/    ║
+║  footer, custom caption, text replacements, and more.                    ║
 ║                                                                          ║
 ║  Sponsored by  : MUSIC                                                   ║
 ║  Developed by  : DEVA                                                    ║
-║  Version       : 6.2                                                     ║
+║  Version       : 6.3                                                     ║
 ║  License       : MIT                                                     ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
-
-
